@@ -74,7 +74,4 @@ dependencies {
     // Coroutines & DataStore
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-
-    // ML Kit for QR/Barcode Calibration scanning
-    implementation("com.google.mlkit:barcode-scanning:17.2.0")
 }

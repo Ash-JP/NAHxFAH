@@ -112,21 +112,63 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case protocol.MsgMobileRegister:
 			var msg protocol.MobileRegisterMessage
 			if err := json.Unmarshal(rawMsg, &msg); err == nil {
-				client.hubID = msg.HubID
+				id := msg.GetID()
+				client.hubID = id
+				version := msg.AppVersion
+				if version == "" {
+					version = msg.Version
+				}
+				h.hubManager.Register(context.Background(), &models.Hub{
+					HubID:      id,
+					DeviceType: msg.DeviceType,
+					Platform:   msg.Platform,
+					Version:    version,
+					Status:     models.HubStatusOnline,
+				})
 				ack := map[string]interface{}{
 					"type":        "mobile_registered",
-					"hub_id":      msg.HubID,
-					"status":      "registered",
+					"device_id":   id,
+					"hub_id":      id,
+					"status":      "ok",
 					"server_time": time.Now().UTC(),
 				}
 				sendJSON(client, ack)
-				slog.Info("mobile app registered on /ws", "hub_id", msg.HubID, "platform", msg.Platform)
+				slog.Info("mobile app registered on /ws", "device_id", id, "platform", msg.Platform)
 			}
 
 		case protocol.MsgMobilePose:
 			var msg protocol.MobilePoseMessage
 			if err := json.Unmarshal(rawMsg, &msg); err == nil {
-				slog.Debug("mobile pose received on /ws", "hub_id", msg.HubID, "x", msg.Position.X, "y", msg.Position.Y, "z", msg.Position.Z)
+				id := msg.DeviceID
+				if id == "" {
+					id = msg.HubID
+				}
+				slog.Debug("mobile pose received on /ws", "id", id, "x", msg.Position.X, "y", msg.Position.Y, "z", msg.Position.Z)
+			}
+
+		case protocol.MsgMobileWiFiObservations:
+			var mobObs protocol.MobileWiFiObservationsMessage
+			if err := json.Unmarshal(rawMsg, &mobObs); err == nil {
+				id := mobObs.GetID()
+				cs := mobObs.Pose.CoordinateSystem
+				if cs == "" {
+					cs = "local"
+				}
+				obsMsg := protocol.WiFiObservationsMessage{
+					Type:      protocol.MsgWiFiObservations,
+					HubID:     id,
+					Timestamp: mobObs.Timestamp,
+					Position: protocol.HubPositionPayload{
+						CoordinateSystem: cs,
+						X:                mobObs.Pose.X,
+						Y:                mobObs.Pose.Y,
+						Z:                mobObs.Pose.Z,
+					},
+					Observations: mobObs.Observations,
+				}
+				go func() {
+					_ = h.obsSvc.ProcessObservations(context.Background(), &obsMsg)
+				}()
 			}
 
 		case protocol.MsgHubRegister:

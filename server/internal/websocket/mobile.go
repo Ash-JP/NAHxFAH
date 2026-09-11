@@ -88,8 +88,17 @@ func (h *MobileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					conn.Close()
 					return
 				}
-				client.hubID = msg.HubID
-				slog.Info("mobile client registered", "hub_id", msg.HubID, "device_type", msg.DeviceType)
+				id := msg.GetID()
+				client.hubID = id
+				ack := map[string]interface{}{
+					"type":        "mobile_registered",
+					"device_id":   id,
+					"hub_id":      id,
+					"status":      "ok",
+					"server_time": time.Now().UTC(),
+				}
+				sendJSON(client, ack)
+				slog.Info("mobile client registered", "id", id, "device_type", msg.DeviceType)
 			}
 
 		case protocol.MsgMobilePose:

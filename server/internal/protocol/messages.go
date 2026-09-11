@@ -29,9 +29,10 @@ const (
 	MsgError         MessageType = "error"
 	MsgAPUpdate      MessageType = "ap_update"
 
-	// Mobile → Server (future, protocol-compatible stubs)
-	MsgMobileRegister MessageType = "mobile_register"
-	MsgMobilePose     MessageType = "mobile_pose"
+	// Mobile → Server
+	MsgMobileRegister         MessageType = "mobile_register"
+	MsgMobilePose             MessageType = "mobile_pose"
+	MsgMobileWiFiObservations MessageType = "mobile_wifi_observations"
 
 	// Server → Dashboard
 	MsgHubStatus        MessageType = "hub_status"
@@ -151,21 +152,59 @@ type APPosition struct {
 // Future Mobile → Server messages (stubs, not implemented client-side yet)
 // ---------------------------------------------------------------------------
 
-// MobileRegisterMessage is the future Android ARCore registration message.
+// MobileRegisterMessage is the Android ARCore registration message.
 type MobileRegisterMessage struct {
 	Type       MessageType `json:"type"`
-	HubID      string      `json:"hub_id"` // Mobile uses same hub_id concept
+	DeviceID   string      `json:"device_id,omitempty"`
+	HubID      string      `json:"hub_id,omitempty"`
 	DeviceType string      `json:"device_type"`
 	Platform   string      `json:"platform"`
-	APIKey     string      `json:"api_key"`
+	AppVersion string      `json:"app_version,omitempty"`
+	Version    string      `json:"version,omitempty"`
+	APIKey     string      `json:"api_key,omitempty"`
+}
+
+// GetID returns DeviceID if populated, otherwise HubID.
+func (m *MobileRegisterMessage) GetID() string {
+	if m.DeviceID != "" {
+		return m.DeviceID
+	}
+	return m.HubID
 }
 
 // MobilePoseMessage carries the ARCore device pose in the shared coordinate system.
 type MobilePoseMessage struct {
-	Type     MessageType    `json:"type"`
-	HubID    string         `json:"hub_id"`
-	Position APPosition     `json:"position"`
+	Type        MessageType `json:"type"`
+	DeviceID    string      `json:"device_id,omitempty"`
+	HubID       string      `json:"hub_id,omitempty"`
+	Position    APPosition  `json:"position"`
 	Orientation Quaternion  `json:"orientation"`
+}
+
+// MobileWiFiObservationsMessage carries Wi-Fi observations and the device's server-world pose.
+type MobileWiFiObservationsMessage struct {
+	Type         MessageType         `json:"type"`
+	DeviceID     string              `json:"device_id,omitempty"`
+	HubID        string              `json:"hub_id,omitempty"`
+	Timestamp    time.Time           `json:"timestamp"`
+	Observations []ObservationEntry  `json:"observations"`
+	Pose         MobilePosePayload   `json:"pose"`
+}
+
+// MobilePosePayload carries server-world coordinates of the mobile device.
+type MobilePosePayload struct {
+	CoordinateSystem string  `json:"coordinate_system"`
+	X                float64 `json:"x"`
+	Y                float64 `json:"y"`
+	Z                float64 `json:"z"`
+}
+
+// GetID returns DeviceID if populated, otherwise HubID.
+func (m *MobileWiFiObservationsMessage) GetID() string {
+	if m.DeviceID != "" {
+		return m.DeviceID
+	}
+	return m.HubID
 }
 
 // Quaternion represents an orientation in 3D space.
