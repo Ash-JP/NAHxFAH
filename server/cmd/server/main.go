@@ -47,6 +47,9 @@ import (
 //go:embed all:migrations
 var migrationsFS embed.FS
 
+//go:embed web/index.html
+var dashboardHTML []byte
+
 const version = "1.0.0"
 
 func main() {
@@ -172,7 +175,8 @@ func main() {
 	// Build WebSocket handlers
 	hubWSHandler := wshandler.NewHubHandler(wsMgr, hubManager, obsSvc, cfg.HubAPIKey)
 	mobileWSHandler := wshandler.NewMobileHandler(wsMgr, cfg.HubAPIKey)
-	dashWSHandler := wshandler.NewDashboardHandler(wsMgr)
+	dashWSHandler := wshandler.NewDashboardHandler(wsMgr, dashboardHTML)
+	universalWSHandler := wshandler.NewUniversalHandler(wsMgr, hubManager, obsSvc, apRepo, cfg.HubAPIKey, dashboardHTML)
 
 	// 10. Mount Chi router
 	r := chi.NewRouter()
@@ -237,7 +241,16 @@ func main() {
 		fmt.Fprintln(w, "OpenAPI spec: /docs/openapi.yaml — see the docs/ directory in the repository.")
 	})
 
+	// Web dashboard
+	serveDashboard := func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(dashboardHTML)
+	}
+	r.Get("/", serveDashboard)
+	r.Get("/dashboard", serveDashboard)
+
 	// WebSocket endpoints
+	r.Get("/ws", universalWSHandler.ServeHTTP)
 	r.Get("/ws/hub", hubWSHandler.ServeHTTP)
 	r.Get("/ws/mobile", mobileWSHandler.ServeHTTP)
 	r.Get("/ws/dashboard", dashWSHandler.ServeHTTP)

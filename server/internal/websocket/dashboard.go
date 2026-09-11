@@ -22,16 +22,24 @@ import (
 
 // DashboardHandler handles WebSocket connections from dashboard clients.
 type DashboardHandler struct {
-	manager *Manager
+	manager       *Manager
+	dashboardHTML []byte
 }
 
 // NewDashboardHandler creates a DashboardHandler.
-func NewDashboardHandler(mgr *Manager) *DashboardHandler {
-	return &DashboardHandler{manager: mgr}
+func NewDashboardHandler(mgr *Manager, html []byte) *DashboardHandler {
+	return &DashboardHandler{manager: mgr, dashboardHTML: html}
 }
 
 // ServeHTTP upgrades and handles dashboard client connections.
 func (h *DashboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// If accessed directly via browser HTTP GET without WebSocket Upgrade header, serve the web dashboard
+	if r.Header.Get("Upgrade") != "websocket" && len(h.dashboardHTML) > 0 {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(h.dashboardHTML)
+		return
+	}
+
 	conn, err := h.manager.Upgrade(w, r)
 	if err != nil {
 		slog.Error("failed to upgrade dashboard connection", "error", err.Error())
