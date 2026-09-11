@@ -1,0 +1,12 @@
+{
+    "server_url": "ws://192.168.1.100:8000/ws/hub",
+    "api_key": "change_me_to_a_long_random_secret",
+    "scan_interval_seconds": 5,
+    "heartbeat_interval_seconds": 5,
+    "coordinate_system": "local",
+    "position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+    }
+}
