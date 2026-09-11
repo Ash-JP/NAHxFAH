@@ -1,0 +1,566 @@
+openapi: 3.1.0
+info:
+  title: WIFI HUNTER AR Server API
+  description: |
+    REST and WebSocket API for the WIFI HUNTER AR spatial localization engine.
+    Supports real-time Wi-Fi observation ingestion, multi-hub 3D localization,
+    and indoor coordinate queries for AR clients.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+  - url: http://0.0.0.0:8000
+    description: LAN container binding
+
+paths:
+  /health:
+    get:
+      summary: Server health check
+      description: Returns liveness status and database connectivity.
+      responses:
+        '200':
+          description: Server and database healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                    example: 1.0.0
+                  database:
+                    type: string
+                    example: connected
+                  timestamp:
+                    type: string
+                    format: date-time
+        '503':
+          description: Service unavailable / database disconnected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/system/status:
+    get:
+      summary: Detailed system runtime metrics
+      description: Returns counts of active APs, localized APs, connected hubs, and WebSocket metrics.
+      responses:
+        '200':
+          description: Current operational telemetry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      uptime_seconds:
+                        type: integer
+                        example: 3600
+                      version:
+                        type: string
+                        example: 1.0.0
+                      connected_hubs:
+                        type: integer
+                        example: 3
+                      active_aps:
+                        type: integer
+                        example: 45
+                      localized_aps:
+                        type: integer
+                        example: 12
+                      observation_count:
+                        type: integer
+                        example: 8400
+                      database_status:
+                        type: string
+                        example: connected
+                      websocket_clients:
+                        type: object
+                        properties:
+                          hubs:
+                            type: integer
+                            example: 3
+                          mobile:
+                            type: integer
+                            example: 1
+                          dashboard:
+                            type: integer
+                            example: 2
+
+  /api/hubs:
+    get:
+      summary: List registered hubs
+      description: Returns list of all registered scanning hubs and their statuses.
+      responses:
+        '200':
+          description: List of hubs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Hub'
+
+  /api/hubs/{hub_id}:
+    get:
+      summary: Get hub by ID
+      parameters:
+        - name: hub_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: HUB-A7F32C
+      responses:
+        '200':
+          description: Hub details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Hub'
+        '404':
+          description: Hub not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/hubs/{hub_id}/position:
+    post:
+      summary: Update hub spatial position
+      parameters:
+        - name: hub_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: HUB-A7F32C
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - x
+                - y
+                - z
+              properties:
+                x:
+                  type: number
+                  format: double
+                  example: 4.5
+                y:
+                  type: number
+                  format: double
+                  example: 8.2
+                z:
+                  type: number
+                  format: double
+                  example: 1.0
+                coordinate_system:
+                  type: string
+                  default: local
+                  example: local
+      responses:
+        '200':
+          description: Position updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Hub'
+        '400':
+          description: Invalid coordinates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/access-points:
+    get:
+      summary: List observed access points
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: status
+          in: query
+          description: Filter by localization status (localized, insufficient_hubs, unknown, degraded)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated access points
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AccessPoint'
+                  total:
+                    type: integer
+                    example: 84
+
+  /api/access-points/{bssid}:
+    get:
+      summary: Get access point by BSSID
+      parameters:
+        - name: bssid
+          in: path
+          required: true
+          schema:
+            type: string
+            example: AA:BB:CC:DD:EE:01
+      responses:
+        '200':
+          description: AP metadata and estimated coordinates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AccessPoint'
+        '404':
+          description: AP not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/access-points/{bssid}/observations:
+    get:
+      summary: Get recent raw observations for an access point
+      parameters:
+        - name: bssid
+          in: path
+          required: true
+          schema:
+            type: string
+            example: AA:BB:CC:DD:EE:01
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Recent raw observations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Observation'
+
+  /api/observations:
+    get:
+      summary: List recent raw observations across all APs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Recent raw observations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Observation'
+
+  /api/anchors:
+    get:
+      summary: List spatial anchors
+      responses:
+        '200':
+          description: Registered coordinate anchors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Anchor'
+    post:
+      summary: Create new spatial anchor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - anchor_id
+                - name
+                - x
+                - y
+                - z
+              properties:
+                anchor_id:
+                  type: string
+                  example: ANCHOR-DOOR-01
+                name:
+                  type: string
+                  example: Conference Room Entrance
+                x:
+                  type: number
+                  example: 0.0
+                y:
+                  type: number
+                  example: 0.0
+                z:
+                  type: number
+                  example: 0.0
+                coordinate_system:
+                  type: string
+                  default: local
+                metadata:
+                  type: object
+      responses:
+        '201':
+          description: Anchor created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Anchor'
+
+components:
+  schemas:
+    Hub:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        hub_id:
+          type: string
+          example: HUB-A7F32C
+        device_type:
+          type: string
+          example: laptop
+        platform:
+          type: string
+          example: windows-11
+        version:
+          type: string
+          example: 1.0.0
+        coordinate_system:
+          type: string
+          example: local
+        x:
+          type: number
+          nullable: true
+          example: 4.5
+        y:
+          type: number
+          nullable: true
+          example: 8.2
+        z:
+          type: number
+          nullable: true
+          example: 1.0
+        status:
+          type: string
+          enum: [ONLINE, STALE, OFFLINE]
+          example: ONLINE
+        last_seen:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AccessPoint:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 10
+        bssid:
+          type: string
+          example: AA:BB:CC:DD:EE:01
+        ssid:
+          type: string
+          nullable: true
+          example: Campus-Secure
+        estimated_x:
+          type: number
+          nullable: true
+          example: 6.84
+        estimated_y:
+          type: number
+          nullable: true
+          example: 11.23
+        estimated_z:
+          type: number
+          nullable: true
+          example: 2.40
+        coordinate_system:
+          type: string
+          example: local
+        confidence:
+          type: number
+          nullable: true
+          example: 0.88
+        error_radius_m:
+          type: number
+          nullable: true
+          example: 1.45
+        observation_count:
+          type: integer
+          example: 142
+        hub_count:
+          type: integer
+          example: 4
+        status:
+          type: string
+          enum: [unknown, insufficient_hubs, localized, degraded]
+          example: localized
+        first_seen:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+
+    Observation:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1042
+        hub_id:
+          type: string
+          example: HUB-A7F32C
+        bssid:
+          type: string
+          example: AA:BB:CC:DD:EE:01
+        ssid:
+          type: string
+          nullable: true
+          example: Campus-Secure
+        rssi_dbm:
+          type: integer
+          nullable: true
+          example: -48
+        link_quality:
+          type: integer
+          nullable: true
+          example: 84
+        frequency_mhz:
+          type: integer
+          nullable: true
+          example: 5180
+        channel:
+          type: integer
+          nullable: true
+          example: 36
+        x:
+          type: number
+          nullable: true
+          example: 4.5
+        y:
+          type: number
+          nullable: true
+          example: 8.2
+        z:
+          type: number
+          nullable: true
+          example: 1.0
+        timestamp:
+          type: string
+          format: date-time
+        ingested_at:
+          type: string
+          format: date-time
+
+    Anchor:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        anchor_id:
+          type: string
+          example: ANCHOR-DOOR-01
+        name:
+          type: string
+          example: Conference Room Entrance
+        x:
+          type: number
+          example: 0.0
+        y:
+          type: number
+          example: 0.0
+        z:
+          type: number
+          example: 0.0
+        coordinate_system:
+          type: string
+          example: local
+        metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: NOT_FOUND
+            message:
+              type: string
+              example: Resource not found

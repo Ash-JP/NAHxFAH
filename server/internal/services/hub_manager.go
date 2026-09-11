@@ -1,0 +1,198 @@
+// Package services provides hub lifecycle management.
+package services
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/nahxfah/wifi-hunter-server/internal/models"
+	"github.com/nahxfah/wifi-hunter-server/internal/repository"
+)
+
+// HubState holds the in-memory runtime state for a connected hub.
+type HubState struct {
+	Hub      *models.Hub
+	LastSeen time.Time
+	Status   models.HubStatus
+}
+
+// HubManager manages connected hub state with thread-safe access.
+type HubManager struct {
+	mu                 sync.RWMutex
+	hubs               map[string]*HubState // key: hub_id
+	hubRepo            *repository.HubRepository
+	staleThreshold     time.Duration
+	offlineThreshold   time.Duration
+	onStatusChange     func(hubID string, status models.HubStatus)
+}
+
+// NewHubManager creates a HubManager with the given thresholds.
+func NewHubManager(
+	hubRepo *repository.HubRepository,
+	staleThresholdSec, offlineThresholdSec int,
+	onStatusChange func(hubID string, status models.HubStatus),
+) *HubManager {
+	return &HubManager{
+		hubs:             make(map[string]*HubState),
+		hubRepo:          hubRepo,
+		staleThreshold:   time.Duration(staleThresholdSec) * time.Second,
+		offlineThreshold: time.Duration(offlineThresholdSec) * time.Second,
+		onStatusChange:   onStatusChange,
+	}
+}
+
+// Register creates or updates the hub record and marks it online.
+func (hm *HubManager) Register(ctx context.Context, hub *models.Hub) error {
+	now := time.Now()
+	hub.Status = models.HubStatusOnline
+	hub.LastSeen = &now
+	hub.CoordinateSystem = "local"
+
+	if err := hm.hubRepo.Upsert(ctx, hub); err != nil {
+		return err
+	}
+
+	hm.mu.Lock()
+	hm.hubs[hub.HubID] = &HubState{
+		Hub:      hub,
+		LastSeen: now,
+		Status:   models.HubStatusOnline,
+	}
+	hm.mu.Unlock()
+
+	slog.Info("hub registered", "hub_id", hub.HubID, "device_type", hub.DeviceType, "platform", hub.Platform)
+	return nil
+}
+
+// Heartbeat updates the hub's last-seen time.
+func (hm *HubManager) Heartbeat(ctx context.Context, hubID string) {
+	now := time.Now()
+
+	hm.mu.Lock()
+	state, ok := hm.hubs[hubID]
+	if ok {
+		state.LastSeen = now
+		if state.Status != models.HubStatusOnline {
+			state.Status = models.HubStatusOnline
+		}
+	}
+	hm.mu.Unlock()
+
+	// Update DB asynchronously to avoid blocking the WebSocket read loop
+	go func() {
+		_ = hm.hubRepo.UpdateStatus(context.Background(), hubID, models.HubStatusOnline, now)
+	}()
+}
+
+// UpdatePosition stores the hub's physical position.
+func (hm *HubManager) UpdatePosition(ctx context.Context, hubID string, x, y, z float64, cs string) error {
+	if err := hm.hubRepo.UpdatePosition(ctx, hubID, x, y, z, cs); err != nil {
+		return err
+	}
+
+	hm.mu.Lock()
+	if state, ok := hm.hubs[hubID]; ok {
+		state.Hub.X = &x
+		state.Hub.Y = &y
+		state.Hub.Z = &z
+		state.Hub.CoordinateSystem = cs
+	}
+	hm.mu.Unlock()
+
+	slog.Info("hub position updated", "hub_id", hubID, "x", x, "y", y, "z", z)
+	return nil
+}
+
+// GetState returns a copy of the hub state if it exists.
+func (hm *HubManager) GetState(hubID string) (*HubState, bool) {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+	state, ok := hm.hubs[hubID]
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to avoid data races
+	stateCopy := *state
+	return &stateCopy, true
+}
+
+// GetPosition returns the hub's current position if configured.
+func (hm *HubManager) GetPosition(hubID string) (x, y, z float64, cs string, ok bool) {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+	state, exists := hm.hubs[hubID]
+	if !exists {
+		return 0, 0, 0, "", false
+	}
+	hub := state.Hub
+	if hub.X == nil || hub.Y == nil || hub.Z == nil {
+		return 0, 0, 0, "", false
+	}
+	return *hub.X, *hub.Y, *hub.Z, hub.CoordinateSystem, true
+}
+
+// Remove removes a hub from the in-memory state (called on disconnect).
+func (hm *HubManager) Remove(hubID string) {
+	hm.mu.Lock()
+	delete(hm.hubs, hubID)
+	hm.mu.Unlock()
+}
+
+// ConnectedCount returns the number of currently tracked hubs.
+func (hm *HubManager) ConnectedCount() int {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+	return len(hm.hubs)
+}
+
+// MonitorStatus runs as a background goroutine that periodically checks hub
+// last-seen times and updates ONLINE/STALE/OFFLINE status.
+func (hm *HubManager) MonitorStatus(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			hm.checkStatuses(ctx)
+		}
+	}
+}
+
+func (hm *HubManager) checkStatuses(ctx context.Context) {
+	now := time.Now()
+
+	hm.mu.Lock()
+	changes := make(map[string]models.HubStatus)
+	for hubID, state := range hm.hubs {
+		age := now.Sub(state.LastSeen)
+		var newStatus models.HubStatus
+		switch {
+		case age > hm.offlineThreshold:
+			newStatus = models.HubStatusOffline
+		case age > hm.staleThreshold:
+			newStatus = models.HubStatusStale
+		default:
+			newStatus = models.HubStatusOnline
+		}
+		if newStatus != state.Status {
+			state.Status = newStatus
+			changes[hubID] = newStatus
+		}
+	}
+	hm.mu.Unlock()
+
+	for hubID, status := range changes {
+		slog.Info("hub status changed", "hub_id", hubID, "status", string(status))
+		go func(id string, s models.HubStatus) {
+			_ = hm.hubRepo.UpdateStatus(context.Background(), id, s, now)
+		}(hubID, status)
+
+		if hm.onStatusChange != nil {
+			hm.onStatusChange(hubID, status)
+		}
+	}
+}

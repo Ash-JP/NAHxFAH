@@ -1,0 +1,90 @@
+version: "3.9"
+
+# =============================================================================
+# WIFI HUNTER AR — Docker Compose
+# =============================================================================
+# Start everything:
+#   docker compose up --build
+#
+# IMPORTANT: Windows hub laptops connect to the Docker HOST's LAN IP, not
+# localhost. Find your LAN IP (e.g. 192.168.1.100) and use:
+#   ws://192.168.1.100:8000/ws/hub
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: wifi_hunter_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wifi_hunter}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-wifi_hunter}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # PostgreSQL is intentionally NOT port-forwarded to the host.
+    # Only the Go server (on the same Docker network) can reach it.
+    # Uncomment the following lines ONLY for local debugging:
+    # ports:
+    #   - "5432:5432"
+    networks:
+      - wifi_hunter_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wifi_hunter} -d ${POSTGRES_DB:-wifi_hunter}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Go Server
+  # ---------------------------------------------------------------------------
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: wifi_hunter_server
+    restart: unless-stopped
+    # Exposes port 8000 so Windows hub laptops on the LAN can connect.
+    ports:
+      - "8000:8000"
+    environment:
+      SERVER_HOST: ${SERVER_HOST:-0.0.0.0}
+      SERVER_PORT: ${SERVER_PORT:-8000}
+      DATABASE_URL: ${DATABASE_URL:-postgres://wifi_hunter:change_me@postgres:5432/wifi_hunter?sslmode=disable}
+      HUB_API_KEY: ${HUB_API_KEY:-change_me_to_a_long_random_secret}
+      BSSID_HASHING: ${BSSID_HASHING:-false}
+      SERVER_SECRET: ${SERVER_SECRET:-change_me_for_bssid_hashing}
+      RSSI_SMOOTHING_ALPHA: ${RSSI_SMOOTHING_ALPHA:-0.25}
+      PATH_LOSS_A: ${PATH_LOSS_A:--45.0}
+      PATH_LOSS_N: ${PATH_LOSS_N:-3.0}
+      LOCALIZATION_MIN_HUBS: ${LOCALIZATION_MIN_HUBS:-3}
+      LOCALIZATION_WINDOW_SECONDS: ${LOCALIZATION_WINDOW_SECONDS:-45}
+      POSITION_SMOOTHING_ALPHA: ${POSITION_SMOOTHING_ALPHA:-0.3}
+      LOCALIZATION_GRID_RESOLUTION: ${LOCALIZATION_GRID_RESOLUTION:-0.5}
+      HUB_STALE_THRESHOLD_SECONDS: ${HUB_STALE_THRESHOLD_SECONDS:-15}
+      HUB_OFFLINE_THRESHOLD_SECONDS: ${HUB_OFFLINE_THRESHOLD_SECONDS:-30}
+      OBSERVATION_RETENTION_HOURS: ${OBSERVATION_RETENTION_HOURS:-24}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - wifi_hunter_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  wifi_hunter_net:
+    driver: bridge

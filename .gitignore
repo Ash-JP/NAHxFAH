@@ -1,0 +1,50 @@
+# Environment
+.env
+*.env.local
+
+# Go
+server/bin/
+server/*.exe
+server/*.test
+server/vendor/
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+hub/.venv/
+
+# Hub runtime data
+hub/hub_data/
+hub/logs/
+hub/config.json
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
