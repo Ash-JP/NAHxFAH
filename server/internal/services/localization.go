@@ -90,6 +90,7 @@ type HubObservation struct {
 	RawRSSIs     []float64
 	Count        int
 	LastSeen     time.Time
+	FrequencyMHz int
 }
 
 // LocalizationResult is the output of the localization engine for one BSSID.
@@ -257,11 +258,11 @@ func (le *LocalizationEngine) Localize(
 	return result, nil
 }
 
-// gridSearch performs a 2D grid search to find the position with maximum
+// gridSearch performs a 3D coarse-to-fine search to find the position with maximum
 // RSSI likelihood given the hub observations.
 //
-// The search grid is bounded by the convex bounding box of hub positions,
-// extended by GridPaddingM in each direction.
+// The search grid is bounded horizontally by the bounding box of hub positions
+// plus GridPaddingM, and vertically between 0.5m and 2.8m (typical indoor AP heights).
 //
 // Returns the best candidate position and the normalized residual [0,1]
 // (0 = perfect fit, 1 = worst fit).
@@ -272,61 +273,127 @@ func (le *LocalizationEngine) gridSearch(hubObs []HubObservation) (Point3D, floa
 		return Point3D{}, 1.0, fmt.Errorf("no observations")
 	}
 
-	// Determine grid bounds
+	// Determine horizontal grid bounds from hub positions
 	minX, maxX := hubObs[0].HubPosition.X, hubObs[0].HubPosition.X
 	minY, maxY := hubObs[0].HubPosition.Y, hubObs[0].HubPosition.Y
-	var avgZ float64
+	minZ, maxZ := hubObs[0].HubPosition.Z, hubObs[0].HubPosition.Z
+
 	for _, o := range hubObs {
 		minX = math.Min(minX, o.HubPosition.X)
 		maxX = math.Max(maxX, o.HubPosition.X)
 		minY = math.Min(minY, o.HubPosition.Y)
 		maxY = math.Max(maxY, o.HubPosition.Y)
-		avgZ += o.HubPosition.Z
+		minZ = math.Min(minZ, o.HubPosition.Z)
+		maxZ = math.Max(maxZ, o.HubPosition.Z)
 	}
-	avgZ /= float64(len(hubObs))
 
 	minX -= cfg.GridPaddingM
 	maxX += cfg.GridPaddingM
 	minY -= cfg.GridPaddingM
 	maxY += cfg.GridPaddingM
 
-	bestPos := Point3D{X: (minX + maxX) / 2, Y: (minY + maxY) / 2, Z: avgZ}
-	bestLikelihood := -1.0
-	maxPossibleLikelihood := float64(len(hubObs)) // all likelihoods = 1.0
+	// Realistic indoor height bounds for AP placement (tables, shelves, ceilings: 0.5m to 2.8m)
+	searchMinZ := math.Max(0.5, minZ-0.5)
+	searchMaxZ := math.Min(2.8, math.Max(maxZ+1.0, 2.2))
+	if searchMinZ >= searchMaxZ {
+		searchMinZ = 0.8
+		searchMaxZ = 2.2
+	}
 
+	bestPos := Point3D{X: (minX + maxX) / 2, Y: (minY + maxY) / 2, Z: (searchMinZ + searchMaxZ) / 2}
+	bestLikelihood := -1.0
+
+	// Stage 1: Coarse 3D search (0.5m horizontal step, 0.4m vertical step)
 	res := cfg.GridResolution
-	for cx := minX; cx <= maxX; cx += res {
-		for cy := minY; cy <= maxY; cy += res {
-			candidate := Point3D{X: cx, Y: cy, Z: avgZ}
-			totalLikelihood := le.candidateLikelihood(candidate, hubObs)
-			if totalLikelihood > bestLikelihood {
-				bestLikelihood = totalLikelihood
-				bestPos = candidate
+	if res <= 0 {
+		res = 0.5
+	}
+	zStep := 0.4
+
+	for cz := searchMinZ; cz <= searchMaxZ; cz += zStep {
+		for cx := minX; cx <= maxX; cx += res {
+			for cy := minY; cy <= maxY; cy += res {
+				candidate := Point3D{X: cx, Y: cy, Z: cz}
+				totalLikelihood := le.candidateLikelihood(candidate, hubObs)
+				if totalLikelihood > bestLikelihood {
+					bestLikelihood = totalLikelihood
+					bestPos = candidate
+				}
 			}
 		}
 	}
 
-	// Residual: 0 = perfect, 1 = worst
-	residual := 1.0
-	if maxPossibleLikelihood > 0 {
-		residual = 1.0 - (bestLikelihood / maxPossibleLikelihood)
+	// Stage 2: Fine 3D search around best candidate (±1.0m horizontal at 0.05m / 5cm, ±0.3m vertical at 0.1m)
+	fineMinX := math.Max(minX, bestPos.X-1.0)
+	fineMaxX := math.Min(maxX, bestPos.X+1.0)
+	fineMinY := math.Max(minY, bestPos.Y-1.0)
+	fineMaxY := math.Min(maxY, bestPos.Y+1.0)
+	fineMinZ := math.Max(searchMinZ, bestPos.Z-0.3)
+	fineMaxZ := math.Min(searchMaxZ, bestPos.Z+0.3)
+	fineRes := 0.05
+
+	for fz := fineMinZ; fz <= fineMaxZ; fz += 0.1 {
+		for fx := fineMinX; fx <= fineMaxX; fx += fineRes {
+			for fy := fineMinY; fy <= fineMaxY; fy += fineRes {
+				candidate := Point3D{X: fx, Y: fy, Z: fz}
+				totalLikelihood := le.candidateLikelihood(candidate, hubObs)
+				if totalLikelihood > bestLikelihood {
+					bestLikelihood = totalLikelihood
+					bestPos = candidate
+				}
+			}
+		}
 	}
+
+	// Residual: 0 = perfect, 1 = worst (likelihood in (0, 1])
+	residual := math.Max(0.0, math.Min(1.0, 1.0-bestLikelihood))
 
 	return bestPos, residual, nil
 }
 
-// candidateLikelihood computes the total RSSI likelihood for a candidate position
-// across all hub observations.
+// candidateLikelihood computes the total Gaussian likelihood for a candidate position
+// across all hub observations using frequency-aware path loss and weighted RMSE.
 func (le *LocalizationEngine) candidateLikelihood(candidate Point3D, hubObs []HubObservation) float64 {
 	cfg := le.config
-	var total float64
+	var totalCost float64
+	var totalWeight float64
+
 	for _, o := range hubObs {
+		// Frequency-dependent reference loss A:
+		// 5 GHz / 6 GHz attenuates ~6 dB faster at 1m than 2.4 GHz
+		refA := cfg.PathLossA
+		if o.FrequencyMHz > 4000 {
+			refA -= 6.0
+		}
+
 		dist := Distance3D(candidate, o.HubPosition)
-		expectedRSSI := DistanceToRSSI(dist, cfg.PathLossA, cfg.PathLossN)
-		likelihood := RSSILikelihood(o.SmoothedRSSI, expectedRSSI, cfg.RSSISigma)
-		total += likelihood
+		expectedRSSI := DistanceToRSSI(dist, refA, cfg.PathLossN)
+
+		// Higher SNR signals have significantly less multipath/penetration distortion
+		weight := 1.0
+		if o.SmoothedRSSI >= -50 {
+			weight = 2.5
+		} else if o.SmoothedRSSI >= -60 {
+			weight = 1.8
+		} else if o.SmoothedRSSI >= -70 {
+			weight = 1.3
+		}
+
+		diff := o.SmoothedRSSI - expectedRSSI
+		totalCost += weight * (diff * diff)
+		totalWeight += weight
 	}
-	return total
+
+	if totalWeight == 0 {
+		return 0
+	}
+
+	rmse := math.Sqrt(totalCost / totalWeight)
+	sigma := cfg.RSSISigma
+	if sigma <= 0 {
+		sigma = 5.0
+	}
+	return math.Exp(-(rmse * rmse) / (2 * sigma * sigma))
 }
 
 // smoothPosition applies EMA smoothing to the estimated position.
@@ -354,23 +421,28 @@ func (le *LocalizationEngine) getOrCreateState(bssid string) *APLocalizationStat
 }
 
 // filterSpatiallyUseful returns only hub observations that contribute
-// spatial information (non-duplicate positions).
+// spatial information (non-duplicate positions separated by >= 0.75m).
 func filterSpatiallyUseful(hubObs []HubObservation) []HubObservation {
 	if len(hubObs) == 0 {
 		return nil
 	}
-	// Deduplicate by hub_id (keep most recent)
-	byHub := make(map[string]HubObservation)
-	for _, o := range hubObs {
-		existing, ok := byHub[o.HubID]
-		if !ok || o.LastSeen.After(existing.LastSeen) {
-			byHub[o.HubID] = o
+	// We want observations that are spatially separated.
+	// Iterate from newest to oldest. Keep observations that are at least 0.75m away
+	// from already kept observations, or from a different hub if positions differ.
+	var result []HubObservation
+	for i := len(hubObs) - 1; i >= 0; i-- {
+		o := hubObs[i]
+		isDuplicate := false
+		for _, kept := range result {
+			if (o.HubID == kept.HubID && Distance3D(o.HubPosition, kept.HubPosition) < 0.5) ||
+				Distance3D(o.HubPosition, kept.HubPosition) < 0.2 {
+				isDuplicate = true
+				break
+			}
 		}
-	}
-
-	result := make([]HubObservation, 0, len(byHub))
-	for _, o := range byHub {
-		result = append(result, o)
+		if !isDuplicate {
+			result = append(result, o)
+		}
 	}
 	return result
 }

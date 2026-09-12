@@ -75,16 +75,17 @@ func EstimateErrorRadius(f ConfidenceFactors, gridResolution float64) float64 {
 	confidence := CalculateConfidence(f)
 
 	// Base uncertainty inversely proportional to confidence
-	// At confidence=1.0 → ~1m; at confidence=0.0 → ~50m
-	baseError := 1.0 + 49.0*(1.0-confidence)
+	// Scaled for room environments:
+	// confidence=1.0 -> 0.8m; confidence=0.8 -> 1.7m; confidence=0.5 -> 5.0m
+	baseError := 0.8 + 12.0*math.Pow(1.0-confidence, 1.5)
 
-	// Add a floor based on grid resolution
-	floor := gridResolution * 1.5
+	// Floor based on fine grid resolution (5cm)
+	floor := 0.25
 
 	errorRadius := math.Max(baseError, floor)
 
-	// Cap at a reasonable maximum for indoor spaces
-	return math.Min(errorRadius, 50.0)
+	// Cap at a realistic room-scale maximum
+	return math.Min(errorRadius, 15.0)
 }
 
 // SpatialDiversity calculates how well a set of hub positions surrounds an

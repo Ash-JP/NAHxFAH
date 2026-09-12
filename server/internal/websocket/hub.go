@@ -99,11 +99,21 @@ func (h *HubHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Version:    regMsg.Version,
 		Status:     models.HubStatusOnline,
 	}
+	if regMsg.Position != nil {
+		hub.X = &regMsg.Position.X
+		hub.Y = &regMsg.Position.Y
+		hub.Z = &regMsg.Position.Z
+		hub.CoordinateSystem = regMsg.Position.CoordinateSystem
+	}
 	if err := h.hubManager.Register(r.Context(), hub); err != nil {
 		slog.Error("failed to register hub", "hub_id", regMsg.HubID, "error", err.Error())
 		sendError(conn, "INTERNAL_ERROR", "Failed to register hub")
 		conn.Close()
 		return
+	}
+	if regMsg.Position != nil {
+		_ = h.hubManager.UpdatePosition(r.Context(), regMsg.HubID, regMsg.Position.X, regMsg.Position.Y, regMsg.Position.Z, regMsg.Position.CoordinateSystem)
+		slog.Info("hub registered with position", "hub_id", regMsg.HubID, "x", regMsg.Position.X, "y", regMsg.Position.Y, "z", regMsg.Position.Z)
 	}
 
 	// Create client and register with manager

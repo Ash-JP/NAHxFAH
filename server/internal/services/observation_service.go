@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,15 +90,22 @@ func (s *ObservationService) ProcessObservations(ctx context.Context, msg *proto
 		return fmt.Errorf("invalid message: %w", err)
 	}
 
-	// Step 2: Verify hub has a position configured
-	hubX, hubY, hubZ, _, hasPos := s.hubManager.GetPosition(msg.HubID)
-	if !hasPos {
-		// Use the position from the message (hub sends its current position)
+	// Step 2: Determine observation position
+	var hubX, hubY, hubZ float64
+	if strings.HasPrefix(msg.HubID, "MOBILE-") || (msg.Position.X != 0 || msg.Position.Y != 0 || msg.Position.Z != 0) {
 		hubX = msg.Position.X
 		hubY = msg.Position.Y
 		hubZ = msg.Position.Z
-		// Update the hub manager with this position
 		_ = s.hubManager.UpdatePosition(ctx, msg.HubID, hubX, hubY, hubZ, msg.Position.CoordinateSystem)
+	} else {
+		var hasPos bool
+		hubX, hubY, hubZ, _, hasPos = s.hubManager.GetPosition(msg.HubID)
+		if !hasPos {
+			hubX = msg.Position.X
+			hubY = msg.Position.Y
+			hubZ = msg.Position.Z
+			_ = s.hubManager.UpdatePosition(ctx, msg.HubID, hubX, hubY, hubZ, msg.Position.CoordinateSystem)
+		}
 	}
 
 	// Step 3: Deduplicate observations by BSSID within this scan
@@ -181,8 +189,12 @@ func (s *ObservationService) ProcessObservations(ctx context.Context, msg *proto
 			rawRSSI := float64(*entry.RSSIDbm)
 			smoothed := s.sigProc.UpdateAndGetSmoothed(msg.HubID, bssid, rawRSSI)
 
+			freq := 2412
+			if entry.FrequencyMHz != nil && *entry.FrequencyMHz > 0 {
+				freq = *entry.FrequencyMHz
+			}
 			// Update in-memory observation cache for localization
-			s.updateObsCache(bssid, msg.HubID, Point3D{X: hubX, Y: hubY, Z: hubZ}, smoothed, rawRSSI)
+			s.updateObsCache(bssid, msg.HubID, Point3D{X: hubX, Y: hubY, Z: hubZ}, smoothed, rawRSSI, freq)
 		}
 	}
 
@@ -199,7 +211,7 @@ func (s *ObservationService) ProcessObservations(ctx context.Context, msg *proto
 }
 
 // updateObsCache adds a hub observation to the in-memory sliding window cache.
-func (s *ObservationService) updateObsCache(bssid, hubID string, pos Point3D, smoothed, raw float64) {
+func (s *ObservationService) updateObsCache(bssid, hubID string, pos Point3D, smoothed, raw float64, freq int) {
 	s.obsCacheMu.Lock()
 	defer s.obsCacheMu.Unlock()
 
@@ -215,8 +227,8 @@ func (s *ObservationService) updateObsCache(bssid, hubID string, pos Point3D, sm
 		if o.LastSeen.Before(windowStart) {
 			continue // expire
 		}
-		if o.HubID == hubID {
-			// Update existing entry
+		// If from same hub and within 0.5m: update existing observation at this vantage point
+		if o.HubID == hubID && Distance3D(o.HubPosition, pos) < 0.5 {
 			o.SmoothedRSSI = smoothed
 			o.RawRSSIs = append(o.RawRSSIs, raw)
 			if len(o.RawRSSIs) > 50 { // cap raw history
@@ -225,6 +237,7 @@ func (s *ObservationService) updateObsCache(bssid, hubID string, pos Point3D, sm
 			o.Count++
 			o.LastSeen = now
 			o.HubPosition = pos
+			o.FrequencyMHz = freq
 			updated = append(updated, o)
 			found = true
 		} else {
@@ -240,7 +253,13 @@ func (s *ObservationService) updateObsCache(bssid, hubID string, pos Point3D, sm
 			RawRSSIs:     []float64{raw},
 			Count:        1,
 			LastSeen:     now,
+			FrequencyMHz: freq,
 		})
+	}
+
+	// Cap at 30 observations per BSSID to prevent unbounded growth
+	if len(updated) > 30 {
+		updated = updated[len(updated)-30:]
 	}
 
 	s.obsCache[bssid] = updated

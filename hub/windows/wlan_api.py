@@ -39,6 +39,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import logging
+import re
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -503,8 +505,8 @@ class WindowsWiFiScanner:
         )
 
         if err != ERROR_SUCCESS:
-            logger.warning("WlanGetNetworkBssList failed with error %d", err)
-            return []
+            logger.warning("WlanGetNetworkBssList failed with error %d, using netsh fallback", err)
+            return self._scan_fallback_netsh()
 
         results: list[BSSEntry] = []
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -514,7 +516,8 @@ class WindowsWiFiScanner:
             count = bss_list.dwNumberOfItems
 
             if count == 0:
-                return []
+                logger.info("WlanGetNetworkBssList returned 0 items, using netsh fallback")
+                return self._scan_fallback_netsh()
 
             # WLAN_BSS_LIST returns a contiguous array of dwNumberOfItems WLAN_BSS_ENTRY structs.
             # (The IE blob referenced by ulIeOffset is located at the tail of the buffer).
@@ -553,6 +556,79 @@ class WindowsWiFiScanner:
         finally:
             _wlan.WlanFreeMemory(bss_list_ptr)
 
+        return results
+
+    def _scan_fallback_netsh(self) -> list[BSSEntry]:
+        """Fallback Wi-Fi scanner using Windows netsh command when native API fails."""
+        try:
+            out = subprocess.check_output(
+                ["netsh", "wlan", "show", "networks", "mode=bssid"],
+                text=True,
+                errors="ignore",
+                timeout=4.0
+            )
+        except Exception as e:
+            logger.warning("netsh fallback failed: %s", e)
+            return []
+
+        results: list[BSSEntry] = []
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        current_ssid = "<hidden>"
+        current_bssid = None
+        current_signal_pct = 0
+        current_channel = 0
+
+        for line in out.splitlines():
+            line_str = line.strip()
+            ssid_m = re.match(r'^SSID \d+\s*:\s*(.*)', line_str)
+            if ssid_m:
+                current_ssid = ssid_m.group(1).strip() or "<hidden>"
+                continue
+
+            bssid_m = re.match(r'^BSSID \d+\s*:\s*([0-9a-fA-F:]{17})', line_str)
+            if bssid_m:
+                if current_bssid and current_signal_pct > 0:
+                    rssi_dbm = int(current_signal_pct / 2 - 100)
+                    freq_mhz = 2412 + (current_channel - 1) * 5 if current_channel <= 14 else 5000 + current_channel * 5
+                    results.append(BSSEntry(
+                        bssid=current_bssid.upper(),
+                        ssid=current_ssid,
+                        rssi_dbm=rssi_dbm,
+                        link_quality=current_signal_pct,
+                        frequency_mhz=freq_mhz if current_channel > 0 else None,
+                        channel=current_channel if current_channel > 0 else None,
+                        timestamp=now
+                    ))
+                current_bssid = bssid_m.group(1)
+                current_signal_pct = 0
+                current_channel = 0
+                continue
+
+            signal_m = re.match(r'^Signal\s*:\s*(\d+)%', line_str)
+            if signal_m:
+                current_signal_pct = int(signal_m.group(1))
+                continue
+
+            channel_m = re.match(r'^Channel\s*:\s*(\d+)', line_str)
+            if channel_m:
+                current_channel = int(channel_m.group(1))
+                continue
+
+        if current_bssid and current_signal_pct > 0:
+            rssi_dbm = int(current_signal_pct / 2 - 100)
+            freq_mhz = 2412 + (current_channel - 1) * 5 if current_channel <= 14 else 5000 + current_channel * 5
+            results.append(BSSEntry(
+                bssid=current_bssid.upper(),
+                ssid=current_ssid,
+                rssi_dbm=rssi_dbm,
+                link_quality=current_signal_pct,
+                frequency_mhz=freq_mhz if current_channel > 0 else None,
+                channel=current_channel if current_channel > 0 else None,
+                timestamp=now
+            ))
+
+        logger.debug("netsh fallback scanned %d BSS entries", len(results))
         return results
 
     def _get_active_interface(self) -> Optional[WLANInterface]:

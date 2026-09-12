@@ -50,6 +50,18 @@ func (hm *HubManager) Register(ctx context.Context, hub *models.Hub) error {
 	hub.LastSeen = &now
 	hub.CoordinateSystem = "local"
 
+	// Preserve existing position from DB if not explicitly provided in registration
+	if hub.X == nil {
+		if existing, err := hm.hubRepo.GetByID(ctx, hub.HubID); err == nil && existing != nil {
+			hub.X = existing.X
+			hub.Y = existing.Y
+			hub.Z = existing.Z
+			if existing.CoordinateSystem != "" {
+				hub.CoordinateSystem = existing.CoordinateSystem
+			}
+		}
+	}
+
 	if err := hm.hubRepo.Upsert(ctx, hub); err != nil {
 		return err
 	}

@@ -37,25 +37,32 @@ class ARMarkerManager(
             val existing = current[update.bssid]
 
             val serverPos = update.position
+            val status = APLocalizationStatus.fromString(update.status)
             var arX: Float? = null
             var arY: Float? = null
             var arZ: Float? = null
 
-            if (serverPos != null) {
+            // Rule 38: Only create a physical AR marker when the server provides a valid localized position
+            if (serverPos != null && (status == APLocalizationStatus.LOCALIZED || status == APLocalizationStatus.UNSTABLE)) {
                 val targetAr = transformer.serverToAr(serverPos)
                 if (existing != null && existing.arPositionX != null && existing.arPositionY != null && existing.arPositionZ != null) {
-                    // Smooth interpolation (alpha lerp = 0.5) to avoid abrupt jumping
-                    arX = existing.arPositionX + 0.5f * (targetAr.first - existing.arPositionX)
-                    arY = existing.arPositionY + 0.5f * (targetAr.second - existing.arPositionY)
-                    arZ = existing.arPositionZ + 0.5f * (targetAr.third - existing.arPositionZ)
+                    // Smooth interpolation (Section 25)
+                    val alpha = 0.35f
+                    arX = existing.arPositionX + alpha * (targetAr.first - existing.arPositionX)
+                    arY = existing.arPositionY + alpha * (targetAr.second - existing.arPositionY)
+                    arZ = existing.arPositionZ + alpha * (targetAr.third - existing.arPositionZ)
                 } else {
                     arX = targetAr.first
                     arY = targetAr.second
                     arZ = targetAr.third
                 }
+            } else {
+                // If insufficient data or no server position, no physical AR marker
+                arX = null
+                arY = null
+                arZ = null
             }
 
-            val status = APLocalizationStatus.fromString(update.status)
             val updatedState = (existing ?: AccessPointUIState(bssid = update.bssid, ssid = update.ssid)).copy(
                 ssid = if (update.ssid.isNotEmpty() && update.ssid != "<hidden>") update.ssid else existing?.ssid ?: update.ssid,
                 serverPosition = serverPos,
@@ -76,62 +83,18 @@ class ARMarkerManager(
         }
     }
 
-    fun onLocalWifiScanResults(
-        scans: List<LocalWifiScan>,
-        camX: Float = 0f,
-        camY: Float = 0f,
-        camZ: Float = 0f,
-        fwdX: Float = 0f,
-        fwdY: Float = 0f,
-        fwdZ: Float = -1f
-    ) {
+    fun onLocalWifiScanResults(scans: List<LocalWifiScan>) {
         scope.launch {
             val current = _accessPoints.value.toMutableMap()
             val scanMap = scans.associateBy { it.bssid }
 
-            // 1. Update existing APs with newly observed phone RSSI and update predicted position
+            // 1. Update existing APs with newly observed phone RSSI
             for ((bssid, apState) in current) {
                 val localScan = scanMap[bssid]
                 if (localScan != null) {
                     val history = (apState.phoneRssiHistory + localScan.rssiDbm).takeLast(10)
-                    val predictedDist = calculateDistanceFromRssi(localScan.rssiDbm)
-
-                    var newArX = apState.arPositionX
-                    var newArY = apState.arPositionY
-                    var newArZ = apState.arPositionZ
-
-                    // If server hasn't provided multi-hub coordinates, predict spatial position from RSSI
-                    if (apState.serverPosition == null) {
-                        if (newArX == null || newArY == null || newArZ == null) {
-                            newArX = camX + fwdX * predictedDist
-                            newArY = camY + fwdY * predictedDist
-                            newArZ = camZ + fwdZ * predictedDist
-                        } else {
-                            // Smoothly adjust distance from camera based on newly observed RSSI
-                            val curDx = newArX - camX
-                            val curDy = newArY - camY
-                            val curDz = newArZ - camZ
-                            val curDist = sqrt(curDx * curDx + curDy * curDy + curDz * curDz).coerceAtLeast(0.1f)
-                            val targetX = camX + (curDx / curDist) * predictedDist
-                            val targetY = camY + (curDy / curDist) * predictedDist
-                            val targetZ = camZ + (curDz / curDist) * predictedDist
-                            newArX = newArX + 0.35f * (targetX - newArX)
-                            newArY = newArY + 0.35f * (targetY - newArY)
-                            newArZ = newArZ + 0.35f * (targetZ - newArZ)
-                        }
-                    }
-
-                    val conf = if (apState.serverPosition != null) apState.confidence else ((localScan.rssiDbm + 100) / 60.0).coerceIn(0.25, 0.95)
-                    val errRadius = if (apState.serverPosition != null) apState.errorRadiusM else (predictedDist * 0.45).toDouble().coerceAtLeast(0.8)
-
                     current[bssid] = apState.copy(
                         ssid = if (localScan.ssid != "<hidden>") localScan.ssid else apState.ssid,
-                        arPositionX = newArX,
-                        arPositionY = newArY,
-                        arPositionZ = newArZ,
-                        confidence = conf,
-                        errorRadiusM = errRadius,
-                        status = if (apState.serverPosition != null) apState.status else APLocalizationStatus.PREDICTED_RSSI,
                         phoneRssiDbm = localScan.rssiDbm,
                         phoneRssiHistory = history,
                         phoneFrequencyMhz = localScan.frequencyMhz,
@@ -144,26 +107,22 @@ class ARMarkerManager(
                 }
             }
 
-            // 2. Add newly discovered APs with RSSI-predicted 3D location in front of camera
+            // 2. Add newly discovered APs as INSUFFICIENT_DATA without fake 3D positions (Rule 38)
             for (scan in scans) {
                 if (!current.containsKey(scan.bssid)) {
-                    val predictedDist = calculateDistanceFromRssi(scan.rssiDbm)
-                    val posX = camX + fwdX * predictedDist
-                    val posY = camY + fwdY * predictedDist
-                    val posZ = camZ + fwdZ * predictedDist
-                    val conf = ((scan.rssiDbm + 100) / 60.0).coerceIn(0.25, 0.95)
-                    val errRadius = (predictedDist * 0.45).toDouble().coerceAtLeast(0.8)
-
                     current[scan.bssid] = AccessPointUIState(
                         bssid = scan.bssid,
                         ssid = scan.ssid,
-                        arPositionX = posX,
-                        arPositionY = posY,
-                        arPositionZ = posZ,
-                        confidence = conf,
-                        errorRadiusM = errRadius,
-                        status = APLocalizationStatus.PREDICTED_RSSI,
-                        quality = if (conf >= 0.7) "high" else if (conf >= 0.45) "medium" else "low",
+                        serverPosition = null,
+                        arPositionX = null,
+                        arPositionY = null,
+                        arPositionZ = null,
+                        confidence = 0.0,
+                        errorRadiusM = 0.0,
+                        status = APLocalizationStatus.INSUFFICIENT_DATA,
+                        quality = "low",
+                        hubCount = 1,
+                        observationCount = 1,
                         phoneRssiDbm = scan.rssiDbm,
                         phoneRssiHistory = listOf(scan.rssiDbm),
                         phoneFrequencyMhz = scan.frequencyMhz,
@@ -176,13 +135,6 @@ class ARMarkerManager(
 
             _accessPoints.value = current
         }
-    }
-
-    private fun calculateDistanceFromRssi(rssiDbm: Int): Float {
-        // Log-distance path loss: d = 10^((A - RSSI) / (10 * n))
-        // A = -45 dBm (reference 1m RSSI), n = 2.8 (indoor path loss exponent)
-        val exp = (-45.0 - rssiDbm) / 28.0
-        return Math.pow(10.0, exp).toFloat().coerceIn(1.2f, 15.0f)
     }
 
     fun updateCameraDistances(camX: Float, camY: Float, camZ: Float) {

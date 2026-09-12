@@ -51,12 +51,13 @@ type BaseMessage struct {
 
 // HubRegisterMessage is the first message sent by a hub after connecting.
 type HubRegisterMessage struct {
-	Type       MessageType `json:"type"`
-	HubID      string      `json:"hub_id"`
-	DeviceType string      `json:"device_type"`
-	Platform   string      `json:"platform"`
-	Version    string      `json:"version"`
-	APIKey     string      `json:"api_key"`
+	Type       MessageType         `json:"type"`
+	HubID      string              `json:"hub_id"`
+	DeviceType string              `json:"device_type"`
+	Platform   string              `json:"platform"`
+	Version    string              `json:"version"`
+	APIKey     string              `json:"api_key"`
+	Position   *HubPositionPayload `json:"position,omitempty"`
 }
 
 // WiFiObservationsMessage contains a batch of scan results from a hub.

@@ -145,6 +145,7 @@ class HubWebSocketClient:
 
     async def _send_register(self, ws) -> None:
         """Send hub_register message."""
+        pos = self._config.position
         msg = {
             "type": "hub_register",
             "hub_id": self._identity.hub_id,
@@ -152,9 +153,16 @@ class HubWebSocketClient:
             "platform": "windows",
             "version": VERSION,
             "api_key": self._config.api_key,
+            "position": {
+                "coordinate_system": pos.coordinate_system,
+                "x": pos.x,
+                "y": pos.y,
+                "z": pos.z,
+            },
         }
         await ws.send(json.dumps(msg))
-        logger.info("Sent hub_register for %s", self._identity.hub_id)
+        logger.info("Sent hub_register for %s at (%.2f, %.2f, %.2f)", 
+                    self._identity.hub_id, pos.x, pos.y, pos.z)
 
     async def _wait_for_registration(self, ws) -> bool:
         """Wait for hub_registered acknowledgement from server."""

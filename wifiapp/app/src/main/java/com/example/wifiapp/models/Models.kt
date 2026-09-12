@@ -176,7 +176,7 @@ data class AccessPointUIState(
         get() = arPositionX != null && arPositionY != null && arPositionZ != null
 
     val isLocalized: Boolean
-        get() = (status == APLocalizationStatus.LOCALIZED && serverPosition != null) || hasSpatialPosition
+        get() = (status == APLocalizationStatus.LOCALIZED || status == APLocalizationStatus.UNSTABLE) && serverPosition != null && hasSpatialPosition
 
     // Helper for RSSI trend ("Getting closer", "Getting farther", "Stable")
     val rssiTrend: String
@@ -204,3 +204,45 @@ data class CalibrationState(
     val rotationYawDegrees: Float = 0f,
     val calibratedAtMs: Long = 0L
 )
+
+data class TimestampedPose(
+    val timestampMs: Long,
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    val qx: Float,
+    val qy: Float,
+    val qz: Float,
+    val qw: Float,
+    val isTracking: Boolean
+)
+
+class PoseHistoryBuffer(private val maxDurationMs: Long = 10_000L) {
+    private val buffer = java.util.concurrent.ConcurrentLinkedDeque<TimestampedPose>()
+
+    fun addPose(pose: TimestampedPose) {
+        buffer.addLast(pose)
+        val cutoff = pose.timestampMs - maxDurationMs
+        while (buffer.isNotEmpty() && buffer.first.timestampMs < cutoff) {
+            buffer.pollFirst()
+        }
+    }
+
+    fun getClosestPose(timestampMs: Long, maxToleranceMs: Long = 4_000L): TimestampedPose? {
+        if (buffer.isEmpty()) return null
+        var closest: TimestampedPose? = null
+        var minDiff = Long.MAX_VALUE
+        for (pose in buffer) {
+            val diff = kotlin.math.abs(pose.timestampMs - timestampMs)
+            if (diff < minDiff) {
+                minDiff = diff
+                closest = pose
+            }
+        }
+        return if (minDiff <= maxToleranceMs) closest else null
+    }
+
+    fun clear() {
+        buffer.clear()
+    }
+}

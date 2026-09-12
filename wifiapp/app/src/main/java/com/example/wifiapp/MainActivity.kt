@@ -54,6 +54,9 @@ import io.github.sceneview.math.Position
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import kotlin.math.atan2
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
@@ -239,6 +242,15 @@ fun MainARScreen(
     val materialLoader = rememberMaterialLoader(engine)
     val childNodes = remember { mutableStateListOf<Node>() }
 
+    // Pose history buffer for timestamp correlation (Section 30, 31)
+    val poseHistory = remember { PoseHistoryBuffer(maxDurationMs = 10_000L) }
+
+    // Movement-based spatial observation tracking
+    var lastDispatchX by remember { mutableFloatStateOf(0f) }
+    var lastDispatchY by remember { mutableFloatStateOf(0f) }
+    var lastDispatchZ by remember { mutableFloatStateOf(0f) }
+    var lastDispatchTimeMs by remember { mutableLongStateOf(0L) }
+
     // Auto-dispatch incoming server AP updates into ARMarkerManager
     LaunchedEffect(Unit) {
         webSocketManager.apUpdates.collectLatest { apUpdate ->
@@ -249,22 +261,15 @@ fun MainARScreen(
     // Auto-update marker manager with local Wi-Fi scans and upload to server
     LaunchedEffect(localScans) {
         if (localScans.isNotEmpty()) {
-            val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
-            val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
-            val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
-
-            markerManager.onLocalWifiScanResults(
-                scans = localScans,
-                camX = cameraPoseX,
-                camY = cameraPoseY,
-                camZ = cameraPoseZ,
-                fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
-                fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
-                fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
-            )
-            // Send mobile Wi-Fi observations + calibrated server pose to server
-            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
-            webSocketManager.sendWifiObservations(localScans, serverPose)
+            markerManager.onLocalWifiScanResults(localScans)
+            if (cameraTrackingState == TrackingState.TRACKING) {
+                val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                webSocketManager.sendWifiObservations(localScans, serverPose)
+                lastDispatchX = cameraPoseX
+                lastDispatchY = cameraPoseY
+                lastDispatchZ = cameraPoseZ
+                lastDispatchTimeMs = System.currentTimeMillis()
+            }
         }
     }
 
@@ -278,6 +283,7 @@ fun MainARScreen(
             onSessionUpdated = { _, frame ->
                 val camera = frame.camera
                 val state = camera.trackingState
+                val previousState = cameraTrackingState
                 cameraTrackingState = state
 
                 if (state == TrackingState.TRACKING) {
@@ -290,6 +296,21 @@ fun MainARScreen(
                     cameraQy = q[1]
                     cameraQz = q[2]
                     cameraQw = q[3]
+
+                    // Record to pose history buffer for timestamp correlation
+                    poseHistory.addPose(
+                        TimestampedPose(
+                            timestampMs = System.currentTimeMillis(),
+                            x = cameraPoseX,
+                            y = cameraPoseY,
+                            z = cameraPoseZ,
+                            qx = cameraQx,
+                            qy = cameraQy,
+                            qz = cameraQz,
+                            qw = cameraQw,
+                            isTracking = true
+                        )
+                    )
 
                     // Capture projection and view matrices for 3D->2D billboard projection
                     val vm = FloatArray(16)
@@ -318,23 +339,29 @@ fun MainARScreen(
                         markerManager.recalculateArCoordinates()
                     }
 
-                    // Update distances from camera to estimated APs
+                    // Update distances from camera to estimated APs (Section 20: Euclidean distance)
                     markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
 
-                    // If we have local scans and any AP lacks an initial 3D position, predict it now
-                    if (localScans.isNotEmpty() && accessPointsMap.values.any { !it.hasSpatialPosition }) {
-                        val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
-                        val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
-                        val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
-                        markerManager.onLocalWifiScanResults(
-                            scans = localScans,
-                            camX = cameraPoseX,
-                            camY = cameraPoseY,
-                            camZ = cameraPoseZ,
-                            fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
-                            fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
-                            fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
-                        )
+                    // Section 7: Continuous observation dispatching as user moves through space
+                    if (localScans.isNotEmpty()) {
+                        val dx = cameraPoseX - lastDispatchX
+                        val dy = cameraPoseY - lastDispatchY
+                        val dz = cameraPoseZ - lastDispatchZ
+                        val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
+                        val now = System.currentTimeMillis()
+                        val elapsedMs = now - lastDispatchTimeMs
+
+                        // Dispatch if: initial (0L), moved >= 0.5m, or periodically every 3s if moved >= 0.15m
+                        if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
+                            lastDispatchX = cameraPoseX
+                            lastDispatchY = cameraPoseY
+                            lastDispatchZ = cameraPoseZ
+                            lastDispatchTimeMs = now
+
+                            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                            webSocketManager.sendWifiObservations(localScans, serverPose)
+                            markerManager.onLocalWifiScanResults(localScans)
+                        }
                     }
 
                     // Dispatch 10 Hz pose to server
@@ -343,13 +370,19 @@ fun MainARScreen(
                         cameraQx, cameraQy, cameraQz, cameraQw,
                         state.name
                     )
+                } else if (state == TrackingState.STOPPED && previousState == TrackingState.TRACKING) {
+                    // Section 40: If ARCore tracking resets, invalidate calibration
+                    calibrationManager.resetCalibration()
+                    poseHistory.clear()
+                    lastDispatchTimeMs = 0L
                 }
             }
         )
 
         // --- 2. AR PREDICTED LOCATION MARKERS & UNCERTAINTY REGIONS ---
+        // Rule 38: Only render physical AR markers when localized by server with 3D coordinates
         val activeAPs = accessPointsMap.values
-            .filter { it.hasSpatialPosition }
+            .filter { it.isLocalized && it.hasSpatialPosition }
             .sortedByDescending { it.phoneRssiDbm ?: -999 }
             .take(12)
         val selectedAP = accessPointsMap[selectedBssid]
@@ -437,6 +470,32 @@ fun MainARScreen(
             }
         }
 
+        // --- 4b. MOVEMENT GUIDANCE BANNER (Section 32) ---
+        if (activeAPs.isEmpty() && localScans.isNotEmpty()) {
+            Surface(
+                color = Color(0xCC111111),
+                shape = RoundedCornerShape(20.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 90.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "🚶", fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Move around the room to collect spatial Wi-Fi measurements",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
         // --- 5. DEBUG OVERLAY ---
         if (showDebugOverlay) {
             DebugInfoOverlay(
@@ -444,7 +503,12 @@ fun MainARScreen(
                 camX = cameraPoseX,
                 camY = cameraPoseY,
                 camZ = cameraPoseZ,
+                qx = cameraQx,
+                qy = cameraQy,
+                qz = cameraQz,
+                qw = cameraQw,
                 serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ),
+                selectedAP = selectedAP,
                 calibration = calibrationState,
                 connection = connectionStatus,
                 apCount = accessPointsMap.size,
@@ -856,7 +920,7 @@ fun ApproachModeBanner(
 }
 
 // ==========================================
-// Debug Overlay
+// Debug Overlay (Section 41)
 // ==========================================
 
 @Composable
@@ -865,7 +929,12 @@ fun DebugInfoOverlay(
     camX: Float,
     camY: Float,
     camZ: Float,
+    qx: Float,
+    qy: Float,
+    qz: Float,
+    qw: Float,
     serverPose: APPosition,
+    selectedAP: AccessPointUIState?,
     calibration: CalibrationState,
     connection: ConnectionStatus,
     apCount: Int,
@@ -873,30 +942,70 @@ fun DebugInfoOverlay(
     scanCount: Int,
     modifier: Modifier = Modifier
 ) {
+    // Calculate Yaw, Pitch, Roll from quaternion
+    val sinr_cosp = 2f * (qw * qx + qy * qz)
+    val cosr_cosp = 1f - 2f * (qx * qx + qy * qy)
+    val roll = Math.toDegrees(atan2(sinr_cosp.toDouble(), cosr_cosp.toDouble())).toFloat()
+
+    val sinp = 2f * (qw * qy - qz * qx)
+    val pitch = if (abs(sinp) >= 1) Math.toDegrees(Math.copySign(Math.PI / 2, sinp.toDouble())).toFloat()
+                else Math.toDegrees(Math.asin(sinp.toDouble())).toFloat()
+
+    val siny_cosp = 2f * (qw * qz + qx * qy)
+    val cosy_cosp = 1f - 2f * (qy * qy + qz * qz)
+    val yaw = Math.toDegrees(atan2(siny_cosp.toDouble(), cosy_cosp.toDouble())).toFloat()
+
     Card(
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xDD000000)),
-        modifier = modifier.width(280.dp)
+        colors = CardDefaults.cardColors(containerColor = Color(0xEE000000)),
+        modifier = modifier.width(300.dp)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             Text(
-                text = "TELEMETRY DEBUG",
+                text = "TELEMETRY DEBUG (SPATIAL)",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
                 color = Color.Yellow
             )
             Spacer(modifier = Modifier.height(4.dp))
+            val debugText = buildString {
+                appendLine("TRACKING: $trackingState")
+                appendLine("PHONE AR POS: (%.2f, %.2f, %.2f)".format(camX, camY, camZ))
+                appendLine("PHONE ROTATION: Y:%.1f° P:%.1f° R:%.1f°".format(yaw, pitch, roll))
+                appendLine("PHONE SERVER POS: (%.2f, %.2f, %.2f)".format(serverPose.x, serverPose.y, serverPose.z))
+                appendLine("CALIBRATION: ${if (calibration.isCalibrated) "VALID" else "INVALID"}")
+                appendLine("SERVER WS: ${connection.name}")
+                appendLine("RAW SCANS: $scanCount | APs: $localizedCount/$apCount")
+                appendLine("------------------------------")
+                if (selectedAP != null) {
+                    appendLine("SELECTED AP: ${selectedAP.ssid}")
+                    val sPos = selectedAP.serverPosition
+                    if (sPos != null) {
+                        appendLine("AP SERVER POS: (%.2f, %.2f, %.2f)".format(sPos.x, sPos.y, sPos.z))
+                    } else {
+                        appendLine("AP SERVER POS: None")
+                    }
+                    if (selectedAP.arPositionX != null) {
+                        appendLine("AP AR POS: (%.2f, %.2f, %.2f)".format(selectedAP.arPositionX, selectedAP.arPositionY, selectedAP.arPositionZ))
+                    } else {
+                        appendLine("AP AR POS: None (Not localized)")
+                    }
+                    appendLine("DISTANCE: ${selectedAP.distanceToUserM?.let { "%.2f m".format(it) } ?: "-- m"}")
+                    appendLine("LOCAL RSSI: ${selectedAP.phoneRssiDbm?.let { "$it dBm" } ?: "Searching"}")
+                    appendLine("CONFIDENCE: ${(selectedAP.confidence * 100).toInt()}%")
+                    appendLine("ERROR: ±%.1f m".format(selectedAP.errorRadiusM))
+                    appendLine("OBSERVATIONS: ${selectedAP.observationCount} | HUBS: ${selectedAP.hubCount}")
+                } else {
+                    appendLine("SELECTED AP: None (Tap to inspect)")
+                }
+            }
             Text(
-                text = "ARCore: $trackingState\n" +
-                        "AR Pose: (%.2f, %.2f, %.2f)\n".format(camX, camY, camZ) +
-                        "Server Pose: (%.2f, %.2f, %.2f)\n".format(serverPose.x, serverPose.y, serverPose.z) +
-                        "Calibrated: ${calibration.isCalibrated} (Yaw: %.1f°)\n".format(calibration.rotationYawDegrees) +
-                        "Server WS: ${connection.name}\n" +
-                        "Raw Scans: $scanCount | APs: $localizedCount/$apCount",
+                text = debugText,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = Color(0xFF00FF66),
-                fontSize = 11.sp
+                fontSize = 10.5.sp,
+                lineHeight = 14.sp
             )
         }
     }
@@ -1129,6 +1238,12 @@ fun APListBottomSheet(
                                         text = "Conf: ${(ap.confidence * 100).roundToInt()}% | ±%.1fm | %d hubs".format(ap.errorRadiusM, ap.hubCount),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color(0xFF0288D1)
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Insufficient localization data (%d obs, %d hubs)".format(ap.observationCount, ap.hubCount),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.Gray
                                     )
                                 }
                             }
