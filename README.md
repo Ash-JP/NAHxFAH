@@ -77,50 +77,49 @@ python main.py
 For Software:
 
 # Screenshots (Add at least 3)
-![Screenshot1](Add screenshot 1 here with proper name)
+![Screenshot1](docs/images/screenshot1_ar_view.png)
 *Augmented Reality HUD displaying floating 3D holographic Wi-Fi access points, real-time RSSI, estimated distance, and venue corner hub markers*
 
-![Screenshot2](Add screenshot 2 here with proper name)
-*Venue Hubs Management sheet showing active corner radar laptops and 1-tap physical AR world alignment*
+![Screenshot2](docs/images/screenshot2_dashboard.jpg)
+*Desktop spatial telemetry web dashboard displaying 3D localized wireframe grid, RSSI spectrum graphs, and live access point tracking*
 
-![Screenshot3](Add screenshot 3 here with proper name)
-*Top status telemetry HUD showing live WebSocket connection, localized AP count, and active radar hubs*
+![Screenshot3](docs/images/screenshot3_hubs.jpg)
+*Venue Hubs Management sheet on Android mobile showing 4 active corner radar laptops and 1-tap physical AR world alignment*
 
 # Diagrams
-![Workflow](Add your workflow/architecture diagram here)
+![Workflow](docs/images/workflow.svg)
 *End-to-end system architecture: Windows Hub agents capturing RSSI -> Central Go Server trilateration engine -> PostgreSQL storage -> Android ARCore real-time 3D overlay*
 
 For Hardware:
 
 # Schematic & Circuit
-![Circuit](Add your circuit diagram here)
-*Add caption explaining connections*
+![Circuit](docs/images/circuit.svg)
+*Hardware interconnect and signal flow: Omnidirectional RF beaconing, 4-corner laptop Wi-Fi NICs, local LAN WebSocket multiplexing, and Android AR phone receiver*
 
-![Schematic](Add your schematic diagram here)
-*Add caption explaining the schematic*
+![Schematic](docs/images/schematic.svg)
+*3D RF multi-lateration geometric schematic: Log-distance path loss propagation model, least-squares likelihood surface, and ARCore world transformation*
 
 # Build Photos
-![Components](Add photo of your components here)
-*List out all components shown*
+![Components](docs/images/components.jpg)
+*Physical hardware deployment components: Android AR smartphone, dual scanning laptops running hub agents, 802.11 Wi-Fi router, and dual-band USB Wi-Fi adapters*
 
-![Build](Add photos of build process here)
-*Explain the build steps*
+![Build](docs/images/build.jpg)
+*Physical room deployment: 4 laptop hub radar stations positioned in the 4 corners of the room synchronized over local LAN*
 
-![Final](Add photo of final product here)
-*Explain the final build*
+![Final](docs/images/final.jpg)
+*Live AR demonstration: First-person augmented reality camera view with floating holographic direction markers pointing directly to the hidden Wi-Fi router*
 
 ### Project Demo
 # Video
 [Add your demo video link here]
-*Explain what the video demonstrates*
+*Live demonstration of 4-corner laptop radar synchronization, venue calibration, and finding hidden Wi-Fi access points in AR*
 
 # Additional Demos
 [Add any extra demo materials/links]
 
 ## Team Contributions
-- [Name 1]: [Specific contributions]
-- [Name 2]: [Specific contributions]
-- [Name 3]: [Specific contributions]
+- Sreedev S S: Go backend architecture, 3D grid localization engine, WebSocket hub manager, and Android ARCore mobile client
+- Aashray J Pramod: Windows WLAN native hub agent, signal processing (EMA/MAD), telemetry web dashboard, and venue multi-hub calibration testing
 
 ---
 Made with ❤️ at TinkerHub Useless Projects 

@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" width="1200" height="620">
+  <defs>
+    <linearGradient id="bgGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070a10"/>
+      <stop offset="100%" stop-color="#0e1726"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="620" fill="url(#bgGrad2)" rx="16"/>
+  <rect width="1196" height="616" x="2" y="2" fill="none" stroke="#1e293b" stroke-width="2" rx="16"/>
+
+  <text x="600" y="45" text-anchor="middle" fill="#00e5ff" font-family="'Segoe UI', system-ui, sans-serif" font-size="22" font-weight="bold" letter-spacing="2">HARDWARE INTERCONNECT &amp; SIGNAL FLOW</text>
+  <text x="600" y="70" text-anchor="middle" fill="#64748b" font-family="'Segoe UI', system-ui, sans-serif" font-size="13">RF Wave Propagation, Corner Sensor Hub Hardware &amp; Local Network Architecture</text>
+
+  <!-- Center: Target Wi-Fi Router -->
+  <g transform="translate(480, 100)">
+    <rect width="240" height="110" rx="10" fill="#1e1b4b" stroke="#818cf8" stroke-width="2"/>
+    <text x="120" y="32" text-anchor="middle" fill="#c7d2fe" font-family="sans-serif" font-size="14" font-weight="bold">TARGET WI-FI AP</text>
+    <text x="120" y="54" text-anchor="middle" fill="#a5b4fc" font-family="sans-serif" font-size="11">802.11 b/g/n/ac/ax Beacon</text>
+    <text x="120" y="74" text-anchor="middle" fill="#6366f1" font-family="sans-serif" font-size="11">Tx Power: +17 dBm EIRP</text>
+    <text x="120" y="94" text-anchor="middle" fill="#38bdf8" font-family="sans-serif" font-size="10">2.412 - 2.472 GHz / 5.180 - 5.825 GHz</text>
+  </g>
+
+  <!-- RF Waves Emanating -->
+  <circle cx="600" cy="155" r="140" fill="none" stroke="#6366f1" stroke-width="1" stroke-dasharray="4,4" opacity="0.6"/>
+  <circle cx="600" cy="155" r="220" fill="none" stroke="#6366f1" stroke-width="1" stroke-dasharray="6,6" opacity="0.4"/>
+  <circle cx="600" cy="155" r="300" fill="none" stroke="#6366f1" stroke-width="1" stroke-dasharray="8,8" opacity="0.2"/>
+
+  <!-- Station Corner 1 (Top Left) -->
+  <g transform="translate(60, 100)">
+    <rect width="260" height="130" rx="10" fill="#0f172a" stroke="#00e5ff" stroke-width="1.5"/>
+    <text x="20" y="28" fill="#00e5ff" font-family="sans-serif" font-size="13" font-weight="bold">STATION 1: HUB-E44C6D</text>
+    <text x="20" y="50" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Location: Room Corner 1 (0, 0, 0)</text>
+    <text x="20" y="70" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Hardware: Windows 11 Laptop</text>
+    <text x="20" y="90" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Adapter: Intel Wi-Fi 6 AX201</text>
+    <text x="20" y="110" fill="#00e676" font-family="sans-serif" font-size="10" font-weight="bold">WlanGetNetworkBssList() @ 100ms</text>
+  </g>
+
+  <!-- Station Corner 2 (Top Right) -->
+  <g transform="translate(880, 100)">
+    <rect width="260" height="130" rx="10" fill="#0f172a" stroke="#b388ff" stroke-width="1.5"/>
+    <text x="20" y="28" fill="#b388ff" font-family="sans-serif" font-size="13" font-weight="bold">STATION 2: HUB-8D5EA1</text>
+    <text x="20" y="50" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Location: Room Corner 2</text>
+    <text x="20" y="70" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Hardware: Windows 11 Laptop</text>
+    <text x="20" y="90" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Adapter: Realtek 802.11ac NIC</text>
+    <text x="20" y="110" fill="#00e676" font-family="sans-serif" font-size="10" font-weight="bold">WlanGetNetworkBssList() @ 100ms</text>
+  </g>
+
+  <!-- Station Corner 3 (Bottom Left) -->
+  <g transform="translate(60, 430)">
+    <rect width="260" height="130" rx="10" fill="#0f172a" stroke="#b388ff" stroke-width="1.5"/>
+    <text x="20" y="28" fill="#b388ff" font-family="sans-serif" font-size="13" font-weight="bold">STATION 3: HUB-3D8C0D</text>
+    <text x="20" y="50" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Location: Room Corner 3</text>
+    <text x="20" y="70" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Hardware: Windows Laptop</text>
+    <text x="20" y="90" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Adapter: Dual-Band USB WLAN</text>
+    <text x="20" y="110" fill="#00e676" font-family="sans-serif" font-size="10" font-weight="bold">WlanGetNetworkBssList() @ 100ms</text>
+  </g>
+
+  <!-- Station Corner 4 (Bottom Right) -->
+  <g transform="translate(880, 430)">
+    <rect width="260" height="130" rx="10" fill="#0f172a" stroke="#b388ff" stroke-width="1.5"/>
+    <text x="20" y="28" fill="#b388ff" font-family="sans-serif" font-size="13" font-weight="bold">STATION 4: HUB-C64D96</text>
+    <text x="20" y="50" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Location: Room Corner 4</text>
+    <text x="20" y="70" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Hardware: Windows Laptop</text>
+    <text x="20" y="90" fill="#94a3b8" font-family="sans-serif" font-size="11">&#8226; Adapter: Qualcomm Atheros WLAN</text>
+    <text x="20" y="110" fill="#00e676" font-family="sans-serif" font-size="10" font-weight="bold">WlanGetNetworkBssList() @ 100ms</text>
+  </g>
+
+  <!-- Center Hub: Network Router / Server -->
+  <g transform="translate(450, 270)">
+    <rect width="300" height="150" rx="12" fill="#022c22" stroke="#10b981" stroke-width="2"/>
+    <text x="150" y="32" text-anchor="middle" fill="#6ee7b7" font-family="sans-serif" font-size="14" font-weight="bold">LOCAL LAN NETWORK &amp; SERVER</text>
+    <text x="150" y="55" text-anchor="middle" fill="#a7f3d0" font-family="sans-serif" font-size="11">TCP/IP Subnet 192.168.x.x</text>
+    <text x="150" y="78" text-anchor="middle" fill="#f1f5f9" font-family="sans-serif" font-size="11">Go Docker Host @ Port 8000</text>
+    <text x="150" y="100" text-anchor="middle" fill="#94a3b8" font-family="sans-serif" font-size="10">4x WebSocket Streams Ingested</text>
+    <text x="150" y="122" text-anchor="middle" fill="#00e5ff" font-family="sans-serif" font-size="11" font-weight="bold">Broadcasts ap_update to AR Client</text>
+  </g>
+
+  <!-- Mobile Phone (Center Bottom) -->
+  <g transform="translate(480, 470)">
+    <rect width="240" height="100" rx="10" fill="#1e1035" stroke="#00e5ff" stroke-width="1.5"/>
+    <text x="120" y="28" text-anchor="middle" fill="#00e5ff" font-family="sans-serif" font-size="13" font-weight="bold">ANDROID AR SMARTPHONE</text>
+    <text x="120" y="48" text-anchor="middle" fill="#94a3b8" font-family="sans-serif" font-size="11">ARCore 6DoF Camera + IMU</text>
+    <text x="120" y="68" text-anchor="middle" fill="#94a3b8" font-family="sans-serif" font-size="11">Filament 3D Hologram Engine</text>
+    <text x="120" y="88" text-anchor="middle" fill="#00e676" font-family="sans-serif" font-size="10" font-weight="bold">WebSocket Client /ws</text>
+  </g>
+
+  <!-- Connection Lines -->
+  <line x1="320" y1="165" x2="450" y2="300" stroke="#00e5ff" stroke-width="2"/>
+  <line x1="880" y1="165" x2="750" y2="300" stroke="#b388ff" stroke-width="2"/>
+  <line x1="320" y1="480" x2="450" y2="390" stroke="#b388ff" stroke-width="2"/>
+  <line x1="880" y1="480" x2="750" y2="390" stroke="#b388ff" stroke-width="2"/>
+  <line x1="600" y1="420" x2="600" y2="470" stroke="#00e676" stroke-width="2.5" stroke-dasharray="4,4"/>
+</svg>
