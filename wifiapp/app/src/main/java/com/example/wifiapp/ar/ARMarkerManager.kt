@@ -76,48 +76,113 @@ class ARMarkerManager(
         }
     }
 
-    fun onLocalWifiScanResults(scans: List<LocalWifiScan>) {
+    fun onLocalWifiScanResults(
+        scans: List<LocalWifiScan>,
+        camX: Float = 0f,
+        camY: Float = 0f,
+        camZ: Float = 0f,
+        fwdX: Float = 0f,
+        fwdY: Float = 0f,
+        fwdZ: Float = -1f
+    ) {
         scope.launch {
             val current = _accessPoints.value.toMutableMap()
             val scanMap = scans.associateBy { it.bssid }
 
-            // 1. Update existing APs with newly observed phone RSSI and history
+            // 1. Update existing APs with newly observed phone RSSI and update predicted position
             for ((bssid, apState) in current) {
                 val localScan = scanMap[bssid]
                 if (localScan != null) {
                     val history = (apState.phoneRssiHistory + localScan.rssiDbm).takeLast(10)
+                    val predictedDist = calculateDistanceFromRssi(localScan.rssiDbm)
+
+                    var newArX = apState.arPositionX
+                    var newArY = apState.arPositionY
+                    var newArZ = apState.arPositionZ
+
+                    // If server hasn't provided multi-hub coordinates, predict spatial position from RSSI
+                    if (apState.serverPosition == null) {
+                        if (newArX == null || newArY == null || newArZ == null) {
+                            newArX = camX + fwdX * predictedDist
+                            newArY = camY + fwdY * predictedDist
+                            newArZ = camZ + fwdZ * predictedDist
+                        } else {
+                            // Smoothly adjust distance from camera based on newly observed RSSI
+                            val curDx = newArX - camX
+                            val curDy = newArY - camY
+                            val curDz = newArZ - camZ
+                            val curDist = sqrt(curDx * curDx + curDy * curDy + curDz * curDz).coerceAtLeast(0.1f)
+                            val targetX = camX + (curDx / curDist) * predictedDist
+                            val targetY = camY + (curDy / curDist) * predictedDist
+                            val targetZ = camZ + (curDz / curDist) * predictedDist
+                            newArX = newArX + 0.35f * (targetX - newArX)
+                            newArY = newArY + 0.35f * (targetY - newArY)
+                            newArZ = newArZ + 0.35f * (targetZ - newArZ)
+                        }
+                    }
+
+                    val conf = if (apState.serverPosition != null) apState.confidence else ((localScan.rssiDbm + 100) / 60.0).coerceIn(0.25, 0.95)
+                    val errRadius = if (apState.serverPosition != null) apState.errorRadiusM else (predictedDist * 0.45).toDouble().coerceAtLeast(0.8)
+
                     current[bssid] = apState.copy(
                         ssid = if (localScan.ssid != "<hidden>") localScan.ssid else apState.ssid,
+                        arPositionX = newArX,
+                        arPositionY = newArY,
+                        arPositionZ = newArZ,
+                        confidence = conf,
+                        errorRadiusM = errRadius,
+                        status = if (apState.serverPosition != null) apState.status else APLocalizationStatus.PREDICTED_RSSI,
                         phoneRssiDbm = localScan.rssiDbm,
                         phoneRssiHistory = history,
                         phoneFrequencyMhz = localScan.frequencyMhz,
                         phoneChannel = localScan.channel,
-                        phoneScanAgeMs = 0L
+                        phoneScanAgeMs = 0L,
+                        lastUpdatedMs = System.currentTimeMillis()
                     )
                 } else {
-                    // Increment scan age
                     current[bssid] = apState.copy(phoneScanAgeMs = apState.phoneScanAgeMs + 6000L)
                 }
             }
 
-            // 2. Add unlocalized APs detected only by the phone
+            // 2. Add newly discovered APs with RSSI-predicted 3D location in front of camera
             for (scan in scans) {
                 if (!current.containsKey(scan.bssid)) {
+                    val predictedDist = calculateDistanceFromRssi(scan.rssiDbm)
+                    val posX = camX + fwdX * predictedDist
+                    val posY = camY + fwdY * predictedDist
+                    val posZ = camZ + fwdZ * predictedDist
+                    val conf = ((scan.rssiDbm + 100) / 60.0).coerceIn(0.25, 0.95)
+                    val errRadius = (predictedDist * 0.45).toDouble().coerceAtLeast(0.8)
+
                     current[scan.bssid] = AccessPointUIState(
                         bssid = scan.bssid,
                         ssid = scan.ssid,
-                        status = APLocalizationStatus.INSUFFICIENT_DATA,
+                        arPositionX = posX,
+                        arPositionY = posY,
+                        arPositionZ = posZ,
+                        confidence = conf,
+                        errorRadiusM = errRadius,
+                        status = APLocalizationStatus.PREDICTED_RSSI,
+                        quality = if (conf >= 0.7) "high" else if (conf >= 0.45) "medium" else "low",
                         phoneRssiDbm = scan.rssiDbm,
                         phoneRssiHistory = listOf(scan.rssiDbm),
                         phoneFrequencyMhz = scan.frequencyMhz,
                         phoneChannel = scan.channel,
-                        phoneScanAgeMs = 0L
+                        phoneScanAgeMs = 0L,
+                        lastUpdatedMs = System.currentTimeMillis()
                     )
                 }
             }
 
             _accessPoints.value = current
         }
+    }
+
+    private fun calculateDistanceFromRssi(rssiDbm: Int): Float {
+        // Log-distance path loss: d = 10^((A - RSSI) / (10 * n))
+        // A = -45 dBm (reference 1m RSSI), n = 2.8 (indoor path loss exponent)
+        val exp = (-45.0 - rssiDbm) / 28.0
+        return Math.pow(10.0, exp).toFloat().coerceIn(1.2f, 15.0f)
     }
 
     fun updateCameraDistances(camX: Float, camY: Float, camZ: Float) {

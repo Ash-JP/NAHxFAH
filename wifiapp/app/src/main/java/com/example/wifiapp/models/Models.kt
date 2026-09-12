@@ -128,6 +128,7 @@ enum class ConnectionStatus {
 
 enum class APLocalizationStatus {
     LOCALIZED,
+    PREDICTED_RSSI,
     UNSTABLE,
     INSUFFICIENT_DATA,
     STALE,
@@ -136,6 +137,7 @@ enum class APLocalizationStatus {
     companion object {
         fun fromString(value: String): APLocalizationStatus = when (value.lowercase()) {
             "localized" -> LOCALIZED
+            "predicted_rssi" -> PREDICTED_RSSI
             "unstable" -> UNSTABLE
             "insufficient_data" -> INSUFFICIENT_DATA
             "stale" -> STALE
@@ -170,8 +172,11 @@ data class AccessPointUIState(
     val isSelected: Boolean = false,
     val lastUpdatedMs: Long = System.currentTimeMillis()
 ) {
+    val hasSpatialPosition: Boolean
+        get() = arPositionX != null && arPositionY != null && arPositionZ != null
+
     val isLocalized: Boolean
-        get() = status == APLocalizationStatus.LOCALIZED && serverPosition != null
+        get() = (status == APLocalizationStatus.LOCALIZED && serverPosition != null) || hasSpatialPosition
 
     // Helper for RSSI trend ("Getting closer", "Getting farther", "Stable")
     val rssiTrend: String
