@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         transformer = CoordinateTransformer()
-        calibrationManager = CalibrationManager(transformer)
+        calibrationManager = CalibrationManager(this, transformer)
         webSocketManager = ServerWebSocketManager(this)
         markerManager = ARMarkerManager(transformer)
         wifiScanner = WifiScanner(this)
@@ -618,6 +618,13 @@ fun MainARScreen(
                         qz = cameraQz,
                         qw = cameraQw
                     )
+                    webSocketManager.sendSaveAnchor(
+                        anchorId = anchorId,
+                        name = "Room Origin ($anchorId)",
+                        x = sX,
+                        y = sY,
+                        z = sZ
+                    )
                     markerManager.recalculateArCoordinates()
                     showCalibrationDialog = false
                 },
@@ -639,7 +646,31 @@ fun MainARScreen(
                 transformer = transformer,
                 onAnchorHub = { hubId, sX, sY, sZ ->
                     webSocketManager.sendUpdateHubPosition(hubId, sX, sY, sZ)
+                    webSocketManager.sendSaveAnchor(
+                        anchorId = hubId,
+                        name = "Venue Hub $hubId",
+                        x = sX,
+                        y = sY,
+                        z = sZ
+                    )
                     markerManager.recalculateArCoordinates()
+                },
+                onAlignArToHub = { hub ->
+                    calibrationManager.setAnchorCalibration(
+                        anchorId = hub.hubId,
+                        serverX = hub.serverPositionX,
+                        serverY = hub.serverPositionY,
+                        serverZ = hub.serverPositionZ,
+                        cameraArX = cameraPoseX,
+                        cameraArY = cameraPoseY,
+                        cameraArZ = cameraPoseZ,
+                        qx = cameraQx,
+                        qy = cameraQy,
+                        qz = cameraQz,
+                        qw = cameraQw
+                    )
+                    markerManager.recalculateArCoordinates()
+                    showHubsSheet = false
                 },
                 onSelectHub = { hubId ->
                     markerManager.selectHub(hubId)
@@ -1585,6 +1616,7 @@ fun VenueHubsBottomSheet(
     cameraZ: Float,
     transformer: CoordinateTransformer,
     onAnchorHub: (hubId: String, sX: Double, sY: Double, sZ: Double) -> Unit,
+    onAlignArToHub: (HubUIState) -> Unit,
     onSelectHub: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1655,6 +1687,7 @@ fun VenueHubsBottomSheet(
                                 val sPose = transformer.arToServer(cameraX, cameraY, cameraZ)
                                 onAnchorHub(hub.hubId, sPose.x, sPose.y, sPose.z)
                             },
+                            onAlignArToHub = { onAlignArToHub(hub) },
                             onSelect = { onSelectHub(hub.hubId) }
                         )
                     }
@@ -1668,6 +1701,7 @@ fun VenueHubsBottomSheet(
 fun HubItemCard(
     hub: HubUIState,
     onAnchorHere: () -> Unit,
+    onAlignArToHub: () -> Unit,
     onSelect: () -> Unit
 ) {
     Card(
@@ -1755,15 +1789,22 @@ fun HubItemCard(
                 if (hub.isCalibrated) {
                     OutlinedButton(
                         onClick = onSelect,
-                        modifier = Modifier.padding(end = 8.dp)
+                        modifier = Modifier.padding(end = 6.dp)
                     ) {
-                        Text("Highlight in AR")
+                        Text("Highlight")
+                    }
+                    OutlinedButton(
+                        onClick = onAlignArToHub,
+                        modifier = Modifier.padding(end = 6.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF2E7D32))
+                    ) {
+                        Text("📍 Align AR")
                     }
                     Button(
                         onClick = onAnchorHere,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
                     ) {
-                        Text("Re-Anchor Here")
+                        Text("Re-Anchor")
                     }
                 } else {
                     Button(

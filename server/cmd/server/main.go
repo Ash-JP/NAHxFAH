@@ -176,7 +176,7 @@ func main() {
 	hubWSHandler := wshandler.NewHubHandler(wsMgr, hubManager, obsSvc, cfg.HubAPIKey)
 	mobileWSHandler := wshandler.NewMobileHandler(wsMgr, cfg.HubAPIKey)
 	dashWSHandler := wshandler.NewDashboardHandler(wsMgr, dashboardHTML)
-	universalWSHandler := wshandler.NewUniversalHandler(wsMgr, hubManager, obsSvc, apRepo, cfg.HubAPIKey, dashboardHTML)
+	universalWSHandler := wshandler.NewUniversalHandler(wsMgr, hubManager, obsSvc, apRepo, anchorRepo, cfg.HubAPIKey, dashboardHTML)
 
 	// 10. Mount Chi router
 	r := chi.NewRouter()

@@ -51,15 +51,13 @@ func (hm *HubManager) Register(ctx context.Context, hub *models.Hub) error {
 	hub.LastSeen = &now
 	hub.CoordinateSystem = "local"
 
-	// Preserve existing position from DB if not explicitly provided in registration
-	if hub.X == nil {
-		if existing, err := hm.hubRepo.GetByID(ctx, hub.HubID); err == nil && existing != nil {
-			hub.X = existing.X
-			hub.Y = existing.Y
-			hub.Z = existing.Z
-			if existing.CoordinateSystem != "" {
-				hub.CoordinateSystem = existing.CoordinateSystem
-			}
+	// Check DB first: if DB already has a calibrated position for this hub, preserve it!
+	if existing, err := hm.hubRepo.GetByID(ctx, hub.HubID); err == nil && existing != nil && existing.X != nil {
+		hub.X = existing.X
+		hub.Y = existing.Y
+		hub.Z = existing.Z
+		if existing.CoordinateSystem != "" {
+			hub.CoordinateSystem = existing.CoordinateSystem
 		}
 	}
 
@@ -111,6 +109,24 @@ func (hm *HubManager) UpdatePosition(ctx context.Context, hubID string, x, y, z 
 		state.Hub.Y = &y
 		state.Hub.Z = &z
 		state.Hub.CoordinateSystem = cs
+	} else {
+		now := time.Now()
+		hm.hubs[hubID] = &HubState{
+			Hub: &models.Hub{
+				HubID:            hubID,
+				DeviceType:       "laptop",
+				Platform:         "windows",
+				Version:          "1.0.0",
+				CoordinateSystem: cs,
+				X:                &x,
+				Y:                &y,
+				Z:                &z,
+				Status:           models.HubStatusOnline,
+				LastSeen:         &now,
+			},
+			LastSeen: now,
+			Status:   models.HubStatusOnline,
+		}
 	}
 	hm.mu.Unlock()
 
@@ -138,6 +154,54 @@ func (hm *HubManager) ListStates() []*HubState {
 	for _, s := range hm.hubs {
 		cpy := *s
 		res = append(res, &cpy)
+	}
+	return res
+}
+
+// ListAllHubs returns all hubs known to the server, combining database records with live runtime state.
+func (hm *HubManager) ListAllHubs(ctx context.Context) []*HubState {
+	dbHubs, err := hm.hubRepo.List(ctx)
+	if err != nil {
+		slog.Error("error querying hubs from DB", "error", err)
+	}
+
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	stateMap := make(map[string]*HubState, len(dbHubs))
+	for _, h := range dbHubs {
+		lastSeen := time.Now()
+		if h.LastSeen != nil {
+			lastSeen = *h.LastSeen
+		}
+		stateMap[h.HubID] = &HubState{
+			Hub:      h,
+			LastSeen: lastSeen,
+			Status:   h.Status,
+		}
+	}
+
+	// Overlay in-memory state (live status, observation count, position)
+	for id, s := range hm.hubs {
+		if existing, ok := stateMap[id]; ok {
+			existing.Status = s.Status
+			existing.LastSeen = s.LastSeen
+			existing.ObservationCount = s.ObservationCount
+			if s.Hub != nil && s.Hub.X != nil {
+				existing.Hub.X = s.Hub.X
+				existing.Hub.Y = s.Hub.Y
+				existing.Hub.Z = s.Hub.Z
+				existing.Hub.CoordinateSystem = s.Hub.CoordinateSystem
+			}
+		} else {
+			cpy := *s
+			stateMap[id] = &cpy
+		}
+	}
+
+	res := make([]*HubState, 0, len(stateMap))
+	for _, s := range stateMap {
+		res = append(res, s)
 	}
 	return res
 }

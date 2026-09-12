@@ -46,19 +46,21 @@ func (r *HubRepository) Upsert(ctx context.Context, hub *models.Hub) error {
 	).Scan(&hub.ID, &hub.CreatedAt, &hub.UpdatedAt)
 }
 
-// UpdatePosition updates the hub's position coordinates.
+// UpdatePosition updates or inserts the hub's position coordinates in the database.
 func (r *HubRepository) UpdatePosition(ctx context.Context, hubID string, x, y, z float64, coordinateSystem string) error {
 	query := `
-		UPDATE hubs
-		SET x = $2, y = $3, z = $4, coordinate_system = $5, updated_at = NOW()
-		WHERE hub_id = $1`
+		INSERT INTO hubs (hub_id, device_type, platform, version, coordinate_system, x, y, z, status, last_seen, created_at, updated_at)
+		VALUES ($1, 'laptop', 'windows', '1.0.0', $5, $2, $3, $4, 'online', NOW(), NOW(), NOW())
+		ON CONFLICT (hub_id) DO UPDATE SET
+			x = EXCLUDED.x,
+			y = EXCLUDED.y,
+			z = EXCLUDED.z,
+			coordinate_system = EXCLUDED.coordinate_system,
+			updated_at = NOW()`
 
-	result, err := r.pool.Exec(ctx, query, hubID, x, y, z, coordinateSystem)
+	_, err := r.pool.Exec(ctx, query, hubID, x, y, z, coordinateSystem)
 	if err != nil {
 		return fmt.Errorf("updating hub position: %w", err)
-	}
-	if result.RowsAffected() == 0 {
-		return fmt.Errorf("hub %q not found", hubID)
 	}
 	return nil
 }
