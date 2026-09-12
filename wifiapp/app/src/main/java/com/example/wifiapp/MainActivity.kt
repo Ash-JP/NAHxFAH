@@ -69,6 +69,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Prevent crashes from uncaught background worker exceptions
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("WIFI_HUNTER_CRASH", "Uncaught exception on thread ${thread.name}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         transformer = CoordinateTransformer()
         calibrationManager = CalibrationManager(this, transformer)
         webSocketManager = ServerWebSocketManager(this)
@@ -291,106 +298,108 @@ fun MainARScreen(
             modelLoader = modelLoader,
             childNodes = childNodes,
             onSessionUpdated = { _, frame ->
-                val camera = frame.camera
-                val state = camera.trackingState
-                val previousState = cameraTrackingState
-                cameraTrackingState = state
+                try {
+                    val camera = frame.camera ?: return@ARScene
+                    val state = camera.trackingState
+                    cameraTrackingState = state
 
-                if (state == TrackingState.TRACKING) {
-                    val pose = camera.pose
-                    cameraPoseX = pose.tx()
-                    cameraPoseY = pose.ty()
-                    cameraPoseZ = pose.tz()
-                    val q = pose.rotationQuaternion
-                    cameraQx = q[0]
-                    cameraQy = q[1]
-                    cameraQz = q[2]
-                    cameraQw = q[3]
-
-                    // Record to pose history buffer for timestamp correlation
-                    poseHistory.addPose(
-                        TimestampedPose(
-                            timestampMs = System.currentTimeMillis(),
-                            x = cameraPoseX,
-                            y = cameraPoseY,
-                            z = cameraPoseZ,
-                            qx = cameraQx,
-                            qy = cameraQy,
-                            qz = cameraQz,
-                            qw = cameraQw,
-                            isTracking = true
-                        )
-                    )
-
-                    // Capture projection and view matrices for 3D->2D billboard projection
-                    val vm = FloatArray(16)
-                    camera.getViewMatrix(vm, 0)
-                    viewMatrix = vm
-
-                    val pm = FloatArray(16)
-                    camera.getProjectionMatrix(pm, 0, 0.1f, 100.0f)
-                    projMatrix = pm
-
-                    // Auto-anchor AR world origin on first tracking frame if not yet calibrated
-                    if (!calibrationState.isCalibrated) {
-                        calibrationManager.setAnchorCalibration(
-                            anchorId = "ORIGIN",
-                            serverX = 0.0,
-                            serverY = 0.0,
-                            serverZ = 0.0,
-                            cameraArX = cameraPoseX,
-                            cameraArY = cameraPoseY,
-                            cameraArZ = cameraPoseZ,
-                            qx = cameraQx,
-                            qy = cameraQy,
-                            qz = cameraQz,
-                            qw = cameraQw
-                        )
-                        markerManager.recalculateArCoordinates()
-                    }
-
-                    // Update distances from camera to estimated APs (Section 20: Euclidean distance)
-                    markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
-
-                    // Section 7: Continuous observation dispatching as user moves through space
-                    if (localScans.isNotEmpty()) {
-                        val dx = cameraPoseX - lastDispatchX
-                        val dy = cameraPoseY - lastDispatchY
-                        val dz = cameraPoseZ - lastDispatchZ
-                        val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
-                        val now = System.currentTimeMillis()
-                        val elapsedMs = now - lastDispatchTimeMs
-
-                        // Dispatch if: initial (0L), moved >= 0.5m, or periodically every 3s if moved >= 0.15m
-                        if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
-                            lastDispatchX = cameraPoseX
-                            lastDispatchY = cameraPoseY
-                            lastDispatchZ = cameraPoseZ
-                            lastDispatchTimeMs = now
-
-                            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
-                            webSocketManager.sendWifiObservations(localScans, serverPose)
-                            markerManager.onLocalWifiScanResults(localScans)
+                    if (state == TrackingState.TRACKING) {
+                        val pose = camera.pose ?: return@ARScene
+                        cameraPoseX = pose.tx()
+                        cameraPoseY = pose.ty()
+                        cameraPoseZ = pose.tz()
+                        val q = pose.rotationQuaternion
+                        if (q.size >= 4) {
+                            cameraQx = q[0]
+                            cameraQy = q[1]
+                            cameraQz = q[2]
+                            cameraQw = q[3]
                         }
-                    }
 
-                    // Dispatch 10 Hz pose to server
-                    webSocketManager.sendPose(
-                        cameraPoseX, cameraPoseY, cameraPoseZ,
-                        cameraQx, cameraQy, cameraQz, cameraQw,
-                        state.name
-                    )
-                } else if (state == TrackingState.STOPPED && previousState == TrackingState.TRACKING) {
-                    // Section 40: If ARCore tracking resets, invalidate calibration
-                    calibrationManager.resetCalibration()
-                    poseHistory.clear()
-                    lastDispatchTimeMs = 0L
+                        // Record to pose history buffer for timestamp correlation
+                        poseHistory.addPose(
+                            TimestampedPose(
+                                timestampMs = System.currentTimeMillis(),
+                                x = cameraPoseX,
+                                y = cameraPoseY,
+                                z = cameraPoseZ,
+                                qx = cameraQx,
+                                qy = cameraQy,
+                                qz = cameraQz,
+                                qw = cameraQw,
+                                isTracking = true
+                            )
+                        )
+
+                        // Capture projection and view matrices for 3D->2D billboard projection
+                        val vm = FloatArray(16)
+                        camera.getViewMatrix(vm, 0)
+                        viewMatrix = vm
+
+                        val pm = FloatArray(16)
+                        camera.getProjectionMatrix(pm, 0, 0.1f, 100.0f)
+                        projMatrix = pm
+
+                        // Auto-anchor AR world origin on first tracking frame if not yet calibrated
+                        if (!calibrationState.isCalibrated) {
+                            calibrationManager.setAnchorCalibration(
+                                anchorId = "ORIGIN",
+                                serverX = 0.0,
+                                serverY = 0.0,
+                                serverZ = 0.0,
+                                cameraArX = cameraPoseX,
+                                cameraArY = cameraPoseY,
+                                cameraArZ = cameraPoseZ,
+                                qx = cameraQx,
+                                qy = cameraQy,
+                                qz = cameraQz,
+                                qw = cameraQw
+                            )
+                            markerManager.recalculateArCoordinates()
+                        }
+
+                        // Update distances from camera to estimated APs
+                        markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
+
+                        // Continuous observation dispatching as user moves through space
+                        if (localScans.isNotEmpty()) {
+                            val dx = cameraPoseX - lastDispatchX
+                            val dy = cameraPoseY - lastDispatchY
+                            val dz = cameraPoseZ - lastDispatchZ
+                            val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
+                            val now = System.currentTimeMillis()
+                            val elapsedMs = now - lastDispatchTimeMs
+
+                            if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
+                                lastDispatchX = cameraPoseX
+                                lastDispatchY = cameraPoseY
+                                lastDispatchZ = cameraPoseZ
+                                lastDispatchTimeMs = now
+
+                                val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                                webSocketManager.sendWifiObservations(localScans, serverPose)
+                                markerManager.onLocalWifiScanResults(localScans)
+                            }
+                        }
+
+                        // Dispatch 10 Hz pose to server
+                        webSocketManager.sendPose(
+                            cameraPoseX, cameraPoseY, cameraPoseZ,
+                            cameraQx, cameraQy, cameraQz, cameraQw,
+                            state.name
+                        )
+                    } else {
+                        // Pause pose history when tracking is lost, but preserve calibration!
+                        poseHistory.clear()
+                        lastDispatchTimeMs = 0L
+                    }
+                } catch (t: Throwable) {
+                    android.util.Log.e("MainARScreen", "Error during AR frame update", t)
                 }
             }
         )
 
         // --- 2. AR PREDICTED LOCATION MARKERS & UNCERTAINTY REGIONS ---
-        // Rule 38: Only render physical AR markers when localized by server with 3D coordinates
         val activeAPs = accessPointsMap.values
             .filter { it.isLocalized && it.hasSpatialPosition }
             .sortedByDescending { it.phoneRssiDbm ?: -999 }
@@ -401,45 +410,92 @@ fun MainARScreen(
             .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null }
         val selectedHub = hubsMap[selectedHubId]
 
-        // Place real 3D glowing spheres in the ARCore camera feed
-        LaunchedEffect(activeAPs, calibratedHubs) {
-            childNodes.clear()
+        // Safely manage 3D glowing spheres without memory leaks or render collisions
+        val nodeMap = remember { mutableMapOf<String, SphereNode>() }
 
-            // 1. Localized Access Points (cyan/amber/red based on confidence)
-            for (ap in activeAPs) {
-                val arX = ap.arPositionX ?: continue
-                val arY = ap.arPositionY ?: continue
-                val arZ = ap.arPositionZ ?: continue
-
-                val color = when {
-                    ap.confidence >= 0.75 -> Color(0xFF00E5FF).toArgb()
-                    ap.confidence >= 0.45 -> Color(0xFFFFB300).toArgb()
-                    else -> Color(0xFFFF5252).toArgb()
+        DisposableEffect(Unit) {
+            onDispose {
+                try {
+                    nodeMap.values.forEach { it.destroy() }
+                    nodeMap.clear()
+                    childNodes.clear()
+                } catch (t: Throwable) {
+                    android.util.Log.e("MainARScreen", "Error disposing AR scene nodes", t)
                 }
-                val mat = materialLoader.createColorInstance(color)
-                val sphere = SphereNode(
-                    engine = engine,
-                    radius = 0.15f,
-                    materialInstance = mat
-                )
-                sphere.position = Position(arX, arY, arZ)
-                childNodes.add(sphere)
             }
+        }
 
-            // 2. Calibrated Venue Hubs (purple/violet beacons)
-            for (hub in calibratedHubs) {
-                val arX = hub.arPositionX ?: continue
-                val arY = hub.arPositionY ?: continue
-                val arZ = hub.arPositionZ ?: continue
+        LaunchedEffect(activeAPs, calibratedHubs) {
+            try {
+                val currentKeys = mutableSetOf<String>()
 
-                val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
-                val sphere = SphereNode(
-                    engine = engine,
-                    radius = 0.20f,
-                    materialInstance = mat
-                )
-                sphere.position = Position(arX, arY, arZ)
-                childNodes.add(sphere)
+                // 1. Localized Access Points (cyan/amber/red based on confidence)
+                for (ap in activeAPs) {
+                    val key = "ap_${ap.bssid}"
+                    currentKeys.add(key)
+                    val arX = ap.arPositionX ?: continue
+                    val arY = ap.arPositionY ?: continue
+                    val arZ = ap.arPositionZ ?: continue
+
+                    val existingNode = nodeMap[key]
+                    if (existingNode != null) {
+                        existingNode.position = Position(arX, arY, arZ)
+                    } else {
+                        val color = when {
+                            ap.confidence >= 0.75 -> Color(0xFF00E5FF).toArgb()
+                            ap.confidence >= 0.45 -> Color(0xFFFFB300).toArgb()
+                            else -> Color(0xFFFF5252).toArgb()
+                        }
+                        val mat = materialLoader.createColorInstance(color)
+                        val sphere = SphereNode(
+                            engine = engine,
+                            radius = 0.15f,
+                            materialInstance = mat
+                        )
+                        sphere.position = Position(arX, arY, arZ)
+                        nodeMap[key] = sphere
+                        childNodes.add(sphere)
+                    }
+                }
+
+                // 2. Calibrated Venue Hubs (purple/violet beacons)
+                for (hub in calibratedHubs) {
+                    val key = "hub_${hub.hubId}"
+                    currentKeys.add(key)
+                    val arX = hub.arPositionX ?: continue
+                    val arY = hub.arPositionY ?: continue
+                    val arZ = hub.arPositionZ ?: continue
+
+                    val existingNode = nodeMap[key]
+                    if (existingNode != null) {
+                        existingNode.position = Position(arX, arY, arZ)
+                    } else {
+                        val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
+                        val sphere = SphereNode(
+                            engine = engine,
+                            radius = 0.20f,
+                            materialInstance = mat
+                        )
+                        sphere.position = Position(arX, arY, arZ)
+                        nodeMap[key] = sphere
+                        childNodes.add(sphere)
+                    }
+                }
+
+                // Clean up removed nodes so Filament memory is never exhausted
+                val it = nodeMap.iterator()
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if (entry.key !in currentKeys) {
+                        try {
+                            entry.value.destroy()
+                        } catch (_: Throwable) {}
+                        childNodes.remove(entry.value)
+                        it.remove()
+                    }
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("MainARScreen", "Error updating AR scene nodes", t)
             }
         }
 
@@ -704,9 +760,10 @@ fun APLocationMarkerOverlay(
     ap: AccessPointUIState,
     onSelect: () -> Unit
 ) {
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
     val density = LocalDensity.current
-    val xDp = with(density) { screenPoint.screenX.toDp() }
-    val yDp = with(density) { screenPoint.screenY.toDp() }
+    val sx = screenPoint.screenX.roundToInt()
+    val sy = screenPoint.screenY.roundToInt()
 
     // Uncertainty radius in pixels scaled inversely with distance
     val dist = ap.distanceToUserM ?: 5.0f
@@ -716,7 +773,7 @@ fun APLocationMarkerOverlay(
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+            .offset { IntOffset(sx, sy) }
     ) {
         // --- Uncertainty Circle / Predicted Location Area ---
         Box(
@@ -834,13 +891,14 @@ fun OffScreenDirectionIndicator(
     ap: AccessPointUIState,
     onClick: () -> Unit
 ) {
-    val density = LocalDensity.current
-    val x = screenPoint.screenX
-    val y = screenPoint.screenY
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
+    val x = screenPoint.screenX.roundToInt()
+    val y = screenPoint.screenY.roundToInt()
+    val angle = if (screenPoint.edgeAngleDegrees.isNaN() || screenPoint.edgeAngleDegrees.isInfinite()) 0f else screenPoint.edgeAngleDegrees
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .offset { IntOffset(x - 45, y - 25) }
             .background(Color(0xDDFF9800), RoundedCornerShape(16.dp))
             .clickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -851,7 +909,7 @@ fun OffScreenDirectionIndicator(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Black,
-                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+                modifier = Modifier.rotate(angle)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
@@ -1496,11 +1554,14 @@ fun HubLocationMarkerOverlay(
     hub: HubUIState,
     onSelect: () -> Unit
 ) {
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
     val density = LocalDensity.current
+    val sx = screenPoint.screenX.roundToInt()
+    val sy = screenPoint.screenY.roundToInt()
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+            .offset { IntOffset(sx, sy) }
     ) {
         // --- Center Hub Pin Point (Purple glowing beacon) ---
         Box(
@@ -1574,12 +1635,14 @@ fun HubOffScreenDirectionIndicator(
     hub: HubUIState,
     onClick: () -> Unit
 ) {
-    val x = screenPoint.screenX
-    val y = screenPoint.screenY
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
+    val x = screenPoint.screenX.roundToInt()
+    val y = screenPoint.screenY.roundToInt()
+    val angle = if (screenPoint.edgeAngleDegrees.isNaN() || screenPoint.edgeAngleDegrees.isInfinite()) 0f else screenPoint.edgeAngleDegrees
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .offset { IntOffset(x - 45, y - 25) }
             .background(Color(0xDD9C27B0), RoundedCornerShape(16.dp))
             .clickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -1590,7 +1653,7 @@ fun HubOffScreenDirectionIndicator(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White,
-                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+                modifier = Modifier.rotate(angle)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(

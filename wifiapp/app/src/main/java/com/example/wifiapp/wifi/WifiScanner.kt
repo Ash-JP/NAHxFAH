@@ -1,13 +1,16 @@
 package com.example.wifiapp.wifi
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.example.wifiapp.models.LocalWifiScan
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,10 +48,14 @@ class WifiScanner(private val context: Context) {
 
     private val wifiScanReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
-            if (intent?.action == WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
-                val success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)
-                Log.d(TAG, "Scan results available broadcast received (success=$success)")
-                processScanResults()
+            try {
+                if (intent?.action == WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
+                    val success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)
+                    Log.d(TAG, "Scan results available broadcast received (success=$success)")
+                    processScanResults()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in wifiScanReceiver: ${e.message}")
             }
         }
     }
@@ -60,10 +67,28 @@ class WifiScanner(private val context: Context) {
             return
         }
 
+        val hasLocationPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasLocationPerm) {
+            Log.w(TAG, "Cannot start WifiScanner: ACCESS_FINE_LOCATION permission not granted yet")
+            return
+        }
+
         if (!isReceiverRegistered) {
-            val intentFilter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
-            context.registerReceiver(wifiScanReceiver, intentFilter)
-            isReceiverRegistered = true
+            try {
+                val intentFilter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(wifiScanReceiver, intentFilter, Context.RECEIVER_EXPORTED)
+                } else {
+                    context.registerReceiver(wifiScanReceiver, intentFilter)
+                }
+                isReceiverRegistered = true
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering wifi scan receiver: ${e.message}")
+            }
         }
 
         // Process any cached scan results immediately
