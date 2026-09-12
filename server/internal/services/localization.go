@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,12 +72,12 @@ func DefaultLocalizationConfig() LocalizationConfig {
 	return LocalizationConfig{
 		MinHubs:               3,
 		WindowSeconds:         45,
-		GridResolution:        0.5,
+		GridResolution:        0.3,
 		GridPaddingM:          5.0,
 		PositionAlpha:         0.3,
-		PathLossA:             -45.0,
-		PathLossN:             3.0,
-		RSSISigma:             6.0,
+		PathLossA:             -40.0,
+		PathLossN:             2.4,
+		RSSISigma:             5.0,
 		InstabilityThresholdM: 8.0,
 		OutlierMADThreshold:   3.5,
 	}
@@ -377,6 +378,13 @@ func (le *LocalizationEngine) candidateLikelihood(candidate Point3D, hubObs []Hu
 			weight = 1.8
 		} else if o.SmoothedRSSI >= -70 {
 			weight = 1.3
+		}
+
+		// Fixed venue laptop hubs provide true ground-truth spatial anchors
+		if !strings.HasPrefix(o.HubID, "MOBILE-") {
+			weight *= 3.0
+		} else {
+			weight *= 0.5
 		}
 
 		diff := o.SmoothedRSSI - expectedRSSI

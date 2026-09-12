@@ -20,11 +20,18 @@ func NewAnchorRepository(pool *pgxpool.Pool) *AnchorRepository {
 	return &AnchorRepository{pool: pool}
 }
 
-// Create inserts a new anchor.
+// Create inserts a new anchor or updates an existing anchor by anchor_id.
 func (r *AnchorRepository) Create(ctx context.Context, anchor *models.Anchor) error {
 	query := `
 		INSERT INTO anchors (anchor_id, name, x, y, z, coordinate_system, metadata, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (anchor_id) DO UPDATE SET
+			name = EXCLUDED.name,
+			x = EXCLUDED.x,
+			y = EXCLUDED.y,
+			z = EXCLUDED.z,
+			coordinate_system = EXCLUDED.coordinate_system,
+			metadata = COALESCE(EXCLUDED.metadata, anchors.metadata)
 		RETURNING id, created_at`
 
 	return r.pool.QueryRow(ctx, query,

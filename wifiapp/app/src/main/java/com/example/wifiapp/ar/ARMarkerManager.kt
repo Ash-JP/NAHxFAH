@@ -263,45 +263,74 @@ class ARMarkerManager(
         screenWidth: Float,
         screenHeight: Float
     ): ScreenPoint {
-        // Transform point by view matrix
-        val vx = viewMatrix[0] * posX + viewMatrix[4] * posY + viewMatrix[8] * posZ + viewMatrix[12]
-        val vy = viewMatrix[1] * posX + viewMatrix[5] * posY + viewMatrix[9] * posZ + viewMatrix[13]
-        val vz = viewMatrix[2] * posX + viewMatrix[6] * posY + viewMatrix[10] * posZ + viewMatrix[14]
-        val vw = viewMatrix[3] * posX + viewMatrix[7] * posY + viewMatrix[11] * posZ + viewMatrix[15]
+        return try {
+            if (screenWidth <= 0f || screenHeight <= 0f || viewMatrix.size < 16 || projMatrix.size < 16) {
+                return ScreenPoint(screenX = -9999f, screenY = -9999f, isVisibleInFov = false)
+            }
+            // If matrices are uninitialized (all zeros)
+            if (viewMatrix[0] == 0f && viewMatrix[5] == 0f && viewMatrix[10] == 0f) {
+                return ScreenPoint(screenX = -9999f, screenY = -9999f, isVisibleInFov = false)
+            }
 
-        // Transform by projection matrix
-        val clipX = projMatrix[0] * vx + projMatrix[4] * vy + projMatrix[8] * vz + projMatrix[12] * vw
-        val clipY = projMatrix[1] * vx + projMatrix[5] * vy + projMatrix[9] * vz + projMatrix[13] * vw
-        val clipZ = projMatrix[2] * vx + projMatrix[6] * vy + projMatrix[10] * vz + projMatrix[14] * vw
-        val clipW = projMatrix[3] * vx + projMatrix[7] * vy + projMatrix[11] * vz + projMatrix[15] * vw
+            // Transform point by view matrix
+            val vx = viewMatrix[0] * posX + viewMatrix[4] * posY + viewMatrix[8] * posZ + viewMatrix[12]
+            val vy = viewMatrix[1] * posX + viewMatrix[5] * posY + viewMatrix[9] * posZ + viewMatrix[13]
+            val vz = viewMatrix[2] * posX + viewMatrix[6] * posY + viewMatrix[10] * posZ + viewMatrix[14]
+            val vw = viewMatrix[3] * posX + viewMatrix[7] * posY + viewMatrix[11] * posZ + viewMatrix[15]
 
-        val isBehind = clipW <= 0.001f
+            // Transform by projection matrix
+            val clipX = projMatrix[0] * vx + projMatrix[4] * vy + projMatrix[8] * vz + projMatrix[12] * vw
+            val clipY = projMatrix[1] * vx + projMatrix[5] * vy + projMatrix[9] * vz + projMatrix[13] * vw
+            val clipZ = projMatrix[2] * vx + projMatrix[6] * vy + projMatrix[10] * vz + projMatrix[14] * vw
+            val clipW = projMatrix[3] * vx + projMatrix[7] * vy + projMatrix[11] * vz + projMatrix[15] * vw
 
-        // Normalized Device Coordinates (NDC) in [-1, 1]
-        val ndcX = clipX / clipW
-        val ndcY = clipY / clipW
+            if (clipW.isNaN() || clipW.isInfinite() || kotlin.math.abs(clipW) < 1e-4f) {
+                return ScreenPoint(screenX = -9999f, screenY = -9999f, isVisibleInFov = false)
+            }
 
-        val inFov = !isBehind && ndcX in -1.0f..1.0f && ndcY in -1.0f..1.0f
+            val isBehind = clipW < 0.05f
 
-        return if (inFov) {
-            val sx = (ndcX + 1f) * 0.5f * screenWidth
-            val sy = (1f - ndcY) * 0.5f * screenHeight
-            ScreenPoint(screenX = sx, screenY = sy, isVisibleInFov = true)
-        } else {
-            // Point is outside screen bounds or behind camera.
-            // Compute edge clamp and angle for directional arrow indicator
-            val dirX = if (isBehind) -ndcX else ndcX
-            val dirY = if (isBehind) -ndcY else ndcY
-            val angle = Math.toDegrees(atan2(dirY.toDouble(), dirX.toDouble())).toFloat()
+            // Normalized Device Coordinates (NDC) in [-1, 1]
+            val ndcX = (clipX / clipW).let { if (it.isNaN() || it.isInfinite()) 0f else it }
+            val ndcY = (clipY / clipW).let { if (it.isNaN() || it.isInfinite()) 0f else it }
 
-            val cx = screenWidth * 0.5f
-            val cy = screenHeight * 0.5f
-            val pad = 64f
+            val inFov = !isBehind && ndcX in -1.0f..1.0f && ndcY in -1.0f..1.0f
 
-            val edgeX = (cx + dirX * (cx - pad)).coerceIn(pad, screenWidth - pad)
-            val edgeY = (cy - dirY * (cy - pad)).coerceIn(pad, screenHeight - pad)
+            return if (inFov) {
+                val sx = ((ndcX + 1f) * 0.5f * screenWidth).coerceIn(0f, screenWidth)
+                val sy = ((1f - ndcY) * 0.5f * screenHeight).coerceIn(0f, screenHeight)
+                ScreenPoint(screenX = sx, screenY = sy, isVisibleInFov = true)
+            } else {
+                var dirX = if (isBehind) -ndcX else ndcX
+                var dirY = if (isBehind) -ndcY else ndcY
+                val len = kotlin.math.sqrt(dirX * dirX + dirY * dirY)
+                if (len > 1e-4f) {
+                    dirX /= len
+                    dirY /= len
+                } else {
+                    dirX = 0f
+                    dirY = -1f
+                }
 
-            ScreenPoint(screenX = edgeX, screenY = edgeY, isVisibleInFov = false, edgeAngleDegrees = angle)
+                val angle = Math.toDegrees(atan2(dirY.toDouble(), dirX.toDouble())).toFloat()
+                val safeAngle = if (angle.isNaN() || angle.isInfinite()) 0f else angle
+
+                val cx = screenWidth * 0.5f
+                val cy = screenHeight * 0.5f
+                val pad = 48f
+
+                val edgeX = (cx + dirX * (cx - pad)).coerceIn(pad, (screenWidth - pad).coerceAtLeast(pad))
+                val edgeY = (cy - dirY * (cy - pad)).coerceIn(pad, (screenHeight - pad).coerceAtLeast(pad))
+
+                ScreenPoint(
+                    screenX = if (edgeX.isNaN()) pad else edgeX,
+                    screenY = if (edgeY.isNaN()) pad else edgeY,
+                    isVisibleInFov = false,
+                    edgeAngleDegrees = safeAngle
+                )
+            }
+        } catch (e: Exception) {
+            ScreenPoint(screenX = -9999f, screenY = -9999f, isVisibleInFov = false)
         }
     }
 }

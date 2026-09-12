@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -28,6 +29,7 @@ type UniversalHandler struct {
 	hubManager    *services.HubManager
 	obsSvc        *services.ObservationService
 	apRepo        *repository.AccessPointRepository
+	anchorRepo    *repository.AnchorRepository
 	apiKey        string
 	dashboardHTML []byte
 }
@@ -38,6 +40,7 @@ func NewUniversalHandler(
 	hubMgr *services.HubManager,
 	obsSvc *services.ObservationService,
 	apRepo *repository.AccessPointRepository,
+	anchorRepo *repository.AnchorRepository,
 	apiKey string,
 	dashboardHTML []byte,
 ) *UniversalHandler {
@@ -46,6 +49,7 @@ func NewUniversalHandler(
 		hubManager:    hubMgr,
 		obsSvc:        obsSvc,
 		apRepo:        apRepo,
+		anchorRepo:    anchorRepo,
 		apiKey:        apiKey,
 		dashboardHTML: dashboardHTML,
 	}
@@ -119,13 +123,8 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if version == "" {
 					version = msg.Version
 				}
-				h.hubManager.Register(context.Background(), &models.Hub{
-					HubID:      id,
-					DeviceType: msg.DeviceType,
-					Platform:   msg.Platform,
-					Version:    version,
-					Status:     models.HubStatusOnline,
-				})
+				// Mobile devices are client observers and AR viewers, NOT stationary venue hubs.
+				// Do not register mobile devices into hubManager as venue hubs.
 				ack := map[string]interface{}{
 					"type":        "mobile_registered",
 					"device_id":   id,
@@ -192,6 +191,39 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.manager.BroadcastToAll(hubUpdateMsg)
 			}
 
+		case protocol.MsgSaveAnchor:
+			var anchorMsg protocol.SaveAnchorMessage
+			if err := json.Unmarshal(rawMsg, &anchorMsg); err == nil {
+				cs := anchorMsg.CoordinateSystem
+				if cs == "" {
+					cs = "local"
+				}
+				name := anchorMsg.Name
+				if name == "" {
+					name = anchorMsg.AnchorID
+				}
+				if h.anchorRepo != nil {
+					err := h.anchorRepo.Create(context.Background(), &models.Anchor{
+						AnchorID:         anchorMsg.AnchorID,
+						Name:             name,
+						X:                anchorMsg.X,
+						Y:                anchorMsg.Y,
+						Z:                anchorMsg.Z,
+						CoordinateSystem: cs,
+					})
+					if err != nil {
+						slog.Error("failed to save anchor to postgres", "anchor_id", anchorMsg.AnchorID, "err", err)
+					} else {
+						slog.Info("anchor persisted to postgres from mobile AR",
+							"anchor_id", anchorMsg.AnchorID,
+							"x", anchorMsg.X,
+							"y", anchorMsg.Y,
+							"z", anchorMsg.Z,
+						)
+					}
+				}
+			}
+
 		case protocol.MsgMobileWiFiObservations:
 			var mobObs protocol.MobileWiFiObservationsMessage
 			if err := json.Unmarshal(rawMsg, &mobObs); err == nil {
@@ -237,15 +269,23 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				sendJSON(client, ack)
 				slog.Info("hub registered on /ws", "hub_id", regMsg.HubID)
 
-				// Broadcast newly registered hub to mobile clients
+				// Determine authoritative position (preserved from DB or registered)
 				var pos *protocol.APPosition
-				if regMsg.Position != nil && (regMsg.Position.X != 0 || regMsg.Position.Y != 0 || regMsg.Position.Z != 0) {
-					pos = &protocol.APPosition{
-						X: regMsg.Position.X,
-						Y: regMsg.Position.Y,
-						Z: regMsg.Position.Z,
-					}
+				if x, y, z, cs, ok := h.hubManager.GetPosition(regMsg.HubID); ok {
+					pos = &protocol.APPosition{X: x, Y: y, Z: z}
+					// Sync the laptop hub with its saved calibrated position
+					h.manager.SendToHub(regMsg.HubID, protocol.HubPositionUpdateMessage{
+						Type:  protocol.MsgHubPositionUpdate,
+						HubID: regMsg.HubID,
+						Position: protocol.HubPositionPayload{
+							CoordinateSystem: cs,
+							X:                x,
+							Y:                y,
+							Z:                z,
+						},
+					})
 				}
+
 				h.manager.BroadcastToMobile(protocol.HubUpdateMessage{
 					Type: protocol.MsgHubUpdate,
 					Hub: protocol.HubPayload{
@@ -349,10 +389,14 @@ func (h *UniversalHandler) sendInitialAPSnapshot(client *Client) {
 
 // sendInitialHubsSnapshot pushes all active venue hubs to the client upon connect.
 func (h *UniversalHandler) sendInitialHubsSnapshot(client *Client) {
-	states := h.hubManager.ListStates()
+	states := h.hubManager.ListAllHubs(context.Background())
 	payloads := make([]protocol.HubPayload, 0, len(states))
 	for _, s := range states {
 		if s.Hub == nil {
+			continue
+		}
+		// Never send mobile devices as stationary venue hubs
+		if s.Hub.DeviceType == "android" || strings.HasPrefix(s.Hub.HubID, "MOBILE-") {
 			continue
 		}
 		var pos *protocol.APPosition

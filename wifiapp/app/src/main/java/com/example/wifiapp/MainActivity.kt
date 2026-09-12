@@ -69,8 +69,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Prevent crashes from uncaught background worker exceptions
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("WIFI_HUNTER_CRASH", "Uncaught exception on thread ${thread.name}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         transformer = CoordinateTransformer()
-        calibrationManager = CalibrationManager(transformer)
+        calibrationManager = CalibrationManager(this, transformer)
         webSocketManager = ServerWebSocketManager(this)
         markerManager = ARMarkerManager(transformer)
         wifiScanner = WifiScanner(this)
@@ -291,106 +298,109 @@ fun MainARScreen(
             modelLoader = modelLoader,
             childNodes = childNodes,
             onSessionUpdated = { _, frame ->
-                val camera = frame.camera
-                val state = camera.trackingState
-                val previousState = cameraTrackingState
-                cameraTrackingState = state
+                try {
+                    val camera = frame.camera ?: return@ARScene
+                    val state = camera.trackingState
+                    cameraTrackingState = state
 
-                if (state == TrackingState.TRACKING) {
-                    val pose = camera.pose
-                    cameraPoseX = pose.tx()
-                    cameraPoseY = pose.ty()
-                    cameraPoseZ = pose.tz()
-                    val q = pose.rotationQuaternion
-                    cameraQx = q[0]
-                    cameraQy = q[1]
-                    cameraQz = q[2]
-                    cameraQw = q[3]
-
-                    // Record to pose history buffer for timestamp correlation
-                    poseHistory.addPose(
-                        TimestampedPose(
-                            timestampMs = System.currentTimeMillis(),
-                            x = cameraPoseX,
-                            y = cameraPoseY,
-                            z = cameraPoseZ,
-                            qx = cameraQx,
-                            qy = cameraQy,
-                            qz = cameraQz,
-                            qw = cameraQw,
-                            isTracking = true
-                        )
-                    )
-
-                    // Capture projection and view matrices for 3D->2D billboard projection
-                    val vm = FloatArray(16)
-                    camera.getViewMatrix(vm, 0)
-                    viewMatrix = vm
-
-                    val pm = FloatArray(16)
-                    camera.getProjectionMatrix(pm, 0, 0.1f, 100.0f)
-                    projMatrix = pm
-
-                    // Auto-anchor AR world origin on first tracking frame if not yet calibrated
-                    if (!calibrationState.isCalibrated) {
-                        calibrationManager.setAnchorCalibration(
-                            anchorId = "ORIGIN",
-                            serverX = 0.0,
-                            serverY = 0.0,
-                            serverZ = 0.0,
-                            cameraArX = cameraPoseX,
-                            cameraArY = cameraPoseY,
-                            cameraArZ = cameraPoseZ,
-                            qx = cameraQx,
-                            qy = cameraQy,
-                            qz = cameraQz,
-                            qw = cameraQw
-                        )
-                        markerManager.recalculateArCoordinates()
-                    }
-
-                    // Update distances from camera to estimated APs (Section 20: Euclidean distance)
-                    markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
-
-                    // Section 7: Continuous observation dispatching as user moves through space
-                    if (localScans.isNotEmpty()) {
-                        val dx = cameraPoseX - lastDispatchX
-                        val dy = cameraPoseY - lastDispatchY
-                        val dz = cameraPoseZ - lastDispatchZ
-                        val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
-                        val now = System.currentTimeMillis()
-                        val elapsedMs = now - lastDispatchTimeMs
-
-                        // Dispatch if: initial (0L), moved >= 0.5m, or periodically every 3s if moved >= 0.15m
-                        if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
-                            lastDispatchX = cameraPoseX
-                            lastDispatchY = cameraPoseY
-                            lastDispatchZ = cameraPoseZ
-                            lastDispatchTimeMs = now
-
-                            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
-                            webSocketManager.sendWifiObservations(localScans, serverPose)
-                            markerManager.onLocalWifiScanResults(localScans)
+                    if (state == TrackingState.TRACKING) {
+                        val pose = camera.pose ?: return@ARScene
+                        cameraPoseX = pose.tx()
+                        cameraPoseY = pose.ty()
+                        cameraPoseZ = pose.tz()
+                        val q = pose.rotationQuaternion
+                        if (q.size >= 4) {
+                            cameraQx = q[0]
+                            cameraQy = q[1]
+                            cameraQz = q[2]
+                            cameraQw = q[3]
                         }
-                    }
 
-                    // Dispatch 10 Hz pose to server
-                    webSocketManager.sendPose(
-                        cameraPoseX, cameraPoseY, cameraPoseZ,
-                        cameraQx, cameraQy, cameraQz, cameraQw,
-                        state.name
-                    )
-                } else if (state == TrackingState.STOPPED && previousState == TrackingState.TRACKING) {
-                    // Section 40: If ARCore tracking resets, invalidate calibration
-                    calibrationManager.resetCalibration()
-                    poseHistory.clear()
-                    lastDispatchTimeMs = 0L
+                        // Record to pose history buffer for timestamp correlation
+                        poseHistory.addPose(
+                            TimestampedPose(
+                                timestampMs = System.currentTimeMillis(),
+                                x = cameraPoseX,
+                                y = cameraPoseY,
+                                z = cameraPoseZ,
+                                qx = cameraQx,
+                                qy = cameraQy,
+                                qz = cameraQz,
+                                qw = cameraQw,
+                                isTracking = true
+                            )
+                        )
+
+                        // Capture projection and view matrices for 3D->2D billboard projection
+                        val vm = FloatArray(16)
+                        camera.getViewMatrix(vm, 0)
+                        viewMatrix = vm
+
+                        val pm = FloatArray(16)
+                        camera.getProjectionMatrix(pm, 0, 0.1f, 100.0f)
+                        projMatrix = pm
+
+                        // Auto-anchor AR world origin on first tracking frame ONLY IF no venue hubs exist
+                        val hasVenueHubs = hubsMap.values.any { it.isCalibrated && !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
+                        if (!calibrationState.isCalibrated && !hasVenueHubs) {
+                            calibrationManager.setAnchorCalibration(
+                                anchorId = "ORIGIN",
+                                serverX = 0.0,
+                                serverY = 0.0,
+                                serverZ = 0.0,
+                                cameraArX = cameraPoseX,
+                                cameraArY = cameraPoseY,
+                                cameraArZ = cameraPoseZ,
+                                qx = cameraQx,
+                                qy = cameraQy,
+                                qz = cameraQz,
+                                qw = cameraQw
+                            )
+                            markerManager.recalculateArCoordinates()
+                        }
+
+                        // Update distances from camera to estimated APs
+                        markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
+
+                        // Continuous observation dispatching as user moves through space
+                        if (localScans.isNotEmpty()) {
+                            val dx = cameraPoseX - lastDispatchX
+                            val dy = cameraPoseY - lastDispatchY
+                            val dz = cameraPoseZ - lastDispatchZ
+                            val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
+                            val now = System.currentTimeMillis()
+                            val elapsedMs = now - lastDispatchTimeMs
+
+                            if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
+                                lastDispatchX = cameraPoseX
+                                lastDispatchY = cameraPoseY
+                                lastDispatchZ = cameraPoseZ
+                                lastDispatchTimeMs = now
+
+                                val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                                webSocketManager.sendWifiObservations(localScans, serverPose)
+                                markerManager.onLocalWifiScanResults(localScans)
+                            }
+                        }
+
+                        // Dispatch 10 Hz pose to server
+                        webSocketManager.sendPose(
+                            cameraPoseX, cameraPoseY, cameraPoseZ,
+                            cameraQx, cameraQy, cameraQz, cameraQw,
+                            state.name
+                        )
+                    } else {
+                        // Pause pose history when tracking is lost, but preserve calibration!
+                        poseHistory.clear()
+                        lastDispatchTimeMs = 0L
+                    }
+                } catch (t: Throwable) {
+                    android.util.Log.e("MainARScreen", "Error during AR frame update", t)
                 }
             }
         )
 
         // --- 2. AR PREDICTED LOCATION MARKERS & UNCERTAINTY REGIONS ---
-        // Rule 38: Only render physical AR markers when localized by server with 3D coordinates
         val activeAPs = accessPointsMap.values
             .filter { it.isLocalized && it.hasSpatialPosition }
             .sortedByDescending { it.phoneRssiDbm ?: -999 }
@@ -398,53 +408,113 @@ fun MainARScreen(
         val selectedAP = accessPointsMap[selectedBssid]
 
         val calibratedHubs = hubsMap.values
-            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null }
+            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null && !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
         val selectedHub = hubsMap[selectedHubId]
 
-        // Place real 3D glowing spheres in the ARCore camera feed
-        LaunchedEffect(activeAPs, calibratedHubs) {
-            childNodes.clear()
+        // Safely manage 3D glowing spheres without memory leaks or render collisions
+        val nodeMap = remember { mutableMapOf<String, SphereNode>() }
 
-            // 1. Localized Access Points (cyan/amber/red based on confidence)
-            for (ap in activeAPs) {
-                val arX = ap.arPositionX ?: continue
-                val arY = ap.arPositionY ?: continue
-                val arZ = ap.arPositionZ ?: continue
-
-                val color = when {
-                    ap.confidence >= 0.75 -> Color(0xFF00E5FF).toArgb()
-                    ap.confidence >= 0.45 -> Color(0xFFFFB300).toArgb()
-                    else -> Color(0xFFFF5252).toArgb()
+        DisposableEffect(Unit) {
+            onDispose {
+                try {
+                    nodeMap.values.forEach { it.destroy() }
+                    nodeMap.clear()
+                    childNodes.clear()
+                } catch (t: Throwable) {
+                    android.util.Log.e("MainARScreen", "Error disposing AR scene nodes", t)
                 }
-                val mat = materialLoader.createColorInstance(color)
-                val sphere = SphereNode(
-                    engine = engine,
-                    radius = 0.15f,
-                    materialInstance = mat
-                )
-                sphere.position = Position(arX, arY, arZ)
-                childNodes.add(sphere)
-            }
-
-            // 2. Calibrated Venue Hubs (purple/violet beacons)
-            for (hub in calibratedHubs) {
-                val arX = hub.arPositionX ?: continue
-                val arY = hub.arPositionY ?: continue
-                val arZ = hub.arPositionZ ?: continue
-
-                val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
-                val sphere = SphereNode(
-                    engine = engine,
-                    radius = 0.20f,
-                    materialInstance = mat
-                )
-                sphere.position = Position(arX, arY, arZ)
-                childNodes.add(sphere)
             }
         }
 
+        LaunchedEffect(activeAPs, calibratedHubs) {
+            try {
+                val currentKeys = mutableSetOf<String>()
+
+                // 1. Localized Access Points (cyan/amber/red based on confidence)
+                for (ap in activeAPs) {
+                    val key = "ap_${ap.bssid}"
+                    currentKeys.add(key)
+                    val arX = ap.arPositionX ?: continue
+                    val arY = ap.arPositionY ?: continue
+                    val arZ = ap.arPositionZ ?: continue
+
+                    val existingNode = nodeMap[key]
+                    if (existingNode != null) {
+                        existingNode.position = Position(arX, arY, arZ)
+                    } else {
+                        val color = when {
+                            ap.confidence >= 0.75 -> Color(0xFF00E5FF).toArgb()
+                            ap.confidence >= 0.45 -> Color(0xFFFFB300).toArgb()
+                            else -> Color(0xFFFF5252).toArgb()
+                        }
+                        val mat = materialLoader.createColorInstance(color)
+                        val sphere = SphereNode(
+                            engine = engine,
+                            radius = 0.15f,
+                            materialInstance = mat
+                        )
+                        sphere.position = Position(arX, arY, arZ)
+                        nodeMap[key] = sphere
+                        childNodes.add(sphere)
+                    }
+                }
+
+                // 2. Calibrated Venue Hubs (purple/violet beacons)
+                for (hub in calibratedHubs) {
+                    val key = "hub_${hub.hubId}"
+                    currentKeys.add(key)
+                    val arX = hub.arPositionX ?: continue
+                    val arY = hub.arPositionY ?: continue
+                    val arZ = hub.arPositionZ ?: continue
+
+                    val existingNode = nodeMap[key]
+                    if (existingNode != null) {
+                        existingNode.position = Position(arX, arY, arZ)
+                    } else {
+                        val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
+                        val sphere = SphereNode(
+                            engine = engine,
+                            radius = 0.20f,
+                            materialInstance = mat
+                        )
+                        sphere.position = Position(arX, arY, arZ)
+                        nodeMap[key] = sphere
+                        childNodes.add(sphere)
+                    }
+                }
+
+                // Clean up removed nodes so Filament memory is never exhausted
+                val it = nodeMap.iterator()
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if (entry.key !in currentKeys) {
+                        try {
+                            entry.value.destroy()
+                        } catch (_: Throwable) {}
+                        childNodes.remove(entry.value)
+                        it.remove()
+                    }
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("MainARScreen", "Error updating AR scene nodes", t)
+            }
+        }
+
+        // Depth-sort active APs: further items rendered first, closer items rendered last (on top)
+        // Selected AP is rendered absolute last so its full card is always in front
+        val sortedAPs = activeAPs.sortedWith(
+            compareBy<AccessPointUIState> { it.bssid == selectedBssid }
+                .thenByDescending { it.distanceToUserM ?: 99f }
+        )
+
+        // Depth-sort calibrated hubs
+        val sortedHubs = calibratedHubs.sortedWith(
+            compareBy<HubUIState> { it.hubId == selectedHubId }
+                .thenByDescending { it.distanceToUserM ?: 99f }
+        )
+
         // 2D overlays for Access Points
-        for (ap in activeAPs) {
+        for (ap in sortedAPs) {
             val arX = ap.arPositionX ?: continue
             val arY = ap.arPositionY ?: continue
             val arZ = ap.arPositionZ ?: continue
@@ -463,7 +533,7 @@ fun MainARScreen(
                 APLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     ap = ap,
-                    onSelect = { markerManager.selectAP(ap.bssid) }
+                    onSelect = { markerManager.selectAP(if (ap.isSelected) null else ap.bssid) }
                 )
             } else if (ap.bssid == selectedBssid) {
                 OffScreenDirectionIndicator(
@@ -475,7 +545,7 @@ fun MainARScreen(
         }
 
         // 2D overlays for Venue Hubs
-        for (hub in calibratedHubs) {
+        for (hub in sortedHubs) {
             val arX = hub.arPositionX ?: continue
             val arY = hub.arPositionY ?: continue
             val arZ = hub.arPositionZ ?: continue
@@ -494,7 +564,7 @@ fun MainARScreen(
                 HubLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     hub = hub,
-                    onSelect = { markerManager.selectHub(hub.hubId) }
+                    onSelect = { markerManager.selectHub(if (hub.isSelected) null else hub.hubId) }
                 )
             } else if (hub.hubId == selectedHubId) {
                 HubOffScreenDirectionIndicator(
@@ -506,16 +576,24 @@ fun MainARScreen(
         }
 
         // --- 3. TOP STATUS HUD ---
+        val stationaryHubs = hubsMap.values.filter { !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
         TopStatusBar(
             connectionStatus = connectionStatus,
             lastScanTimeMs = lastScanTime,
             apCount = accessPointsMap.size,
             localizedCount = activeAPs.size,
-            hubsCount = hubsMap.size,
-            uncalibratedHubsCount = hubsMap.values.count { !it.isCalibrated },
+            hubsCount = stationaryHubs.size,
+            uncalibratedHubsCount = stationaryHubs.count { !it.isCalibrated },
             isCalibrated = calibrationState.isCalibrated,
+            anchorId = calibrationState.anchorId,
             onOpenSettings = { showSettingsDialog = true },
-            onOpenCalibration = { showCalibrationDialog = true },
+            onOpenCalibration = {
+                if (stationaryHubs.isNotEmpty()) {
+                    showHubsSheet = true
+                } else {
+                    showCalibrationDialog = true
+                }
+            },
             onOpenHubs = { showHubsSheet = true },
             onOpenAPList = { showAPListSheet = true },
             onToggleDebug = { showDebugOverlay = !showDebugOverlay }
@@ -581,7 +659,8 @@ fun MainARScreen(
                 scanCount = localScans.size,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 80.dp, start = 16.dp)
+                    .statusBarsPadding()
+                    .padding(top = 120.dp, start = 14.dp)
             )
         }
 
@@ -617,6 +696,13 @@ fun MainARScreen(
                         qz = cameraQz,
                         qw = cameraQw
                     )
+                    webSocketManager.sendSaveAnchor(
+                        anchorId = anchorId,
+                        name = "Room Origin ($anchorId)",
+                        x = sX,
+                        y = sY,
+                        z = sZ
+                    )
                     markerManager.recalculateArCoordinates()
                     showCalibrationDialog = false
                 },
@@ -638,7 +724,31 @@ fun MainARScreen(
                 transformer = transformer,
                 onAnchorHub = { hubId, sX, sY, sZ ->
                     webSocketManager.sendUpdateHubPosition(hubId, sX, sY, sZ)
+                    webSocketManager.sendSaveAnchor(
+                        anchorId = hubId,
+                        name = "Venue Hub $hubId",
+                        x = sX,
+                        y = sY,
+                        z = sZ
+                    )
                     markerManager.recalculateArCoordinates()
+                },
+                onAlignArToHub = { hub ->
+                    calibrationManager.setAnchorCalibration(
+                        anchorId = hub.hubId,
+                        serverX = hub.serverPositionX,
+                        serverY = hub.serverPositionY,
+                        serverZ = hub.serverPositionZ,
+                        cameraArX = cameraPoseX,
+                        cameraArY = cameraPoseY,
+                        cameraArZ = cameraPoseZ,
+                        qx = cameraQx,
+                        qy = cameraQy,
+                        qz = cameraQz,
+                        qw = cameraQw
+                    )
+                    markerManager.recalculateArCoordinates()
+                    showHubsSheet = false
                 },
                 onSelectHub = { hubId ->
                     markerManager.selectHub(hubId)
@@ -672,9 +782,10 @@ fun APLocationMarkerOverlay(
     ap: AccessPointUIState,
     onSelect: () -> Unit
 ) {
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
     val density = LocalDensity.current
-    val xDp = with(density) { screenPoint.screenX.toDp() }
-    val yDp = with(density) { screenPoint.screenY.toDp() }
+    val sx = screenPoint.screenX.roundToInt()
+    val sy = screenPoint.screenY.roundToInt()
 
     // Uncertainty radius in pixels scaled inversely with distance
     val dist = ap.distanceToUserM ?: 5.0f
@@ -684,106 +795,163 @@ fun APLocationMarkerOverlay(
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+            .offset { IntOffset(sx, sy) }
     ) {
-        // --- Uncertainty Circle / Predicted Location Area ---
-        Box(
-            modifier = Modifier
-                .size(errorDpRadius * 2)
-                .offset(-errorDpRadius, -errorDpRadius)
-                .background(
-                    color = when {
-                        ap.confidence >= 0.75 -> Color(0x334CAF50)
-                        ap.confidence >= 0.45 -> Color(0x33FF9800)
-                        else -> Color(0x33F44336)
-                    },
-                    shape = CircleShape
-                )
-                .border(
-                    width = 2.dp,
-                    color = when {
+        if (ap.isSelected) {
+            // --- Uncertainty Circle / Predicted Location Area (Only for selected AP) ---
+            Box(
+                modifier = Modifier
+                    .size(errorDpRadius * 2)
+                    .offset(-errorDpRadius, -errorDpRadius)
+                    .background(
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0x334CAF50)
+                            ap.confidence >= 0.45 -> Color(0x33FF9800)
+                            else -> Color(0x33F44336)
+                        },
+                        shape = CircleShape
+                    )
+                    .border(
+                        width = 2.dp,
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0x994CAF50)
+                            ap.confidence >= 0.45 -> Color(0x99FF9800)
+                            else -> Color(0x99F44336)
+                        },
+                        shape = CircleShape
+                    )
+            )
+
+            // --- Center AP Pin Point (Selected) ---
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .offset((-8).dp, (-8).dp)
+                    .background(Color.White, CircleShape)
+                    .border(3.dp, Color.Yellow, CircleShape)
+            )
+
+            // --- Floating Billboard HUD Card ---
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xEE002244)
+                ),
+                border = borderCardStroke(Color.Yellow),
+                modifier = Modifier
+                    .offset(x = (-80).dp, y = (-130).dp)
+                    .width(175.dp)
+                    .clickable { onSelect() }
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    // SSID
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "📶",
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = ap.ssid.ifEmpty { "<Hidden SSID>" },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(3.dp))
+
+                    // Real Phone RSSI
+                    val phoneRssi = ap.phoneRssiDbm
+                    Text(
+                        text = if (phoneRssi != null) "● $phoneRssi dBm (phone)" else "● No local signal",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (phoneRssi != null && phoneRssi > -65) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    // Distance
+                    Text(
+                        text = ap.distanceToUserM?.let { "~%.1f m away".format(it) } ?: "Estimating distance...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.LightGray
+                    )
+
+                    // Confidence & Accuracy
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Conf: ${(ap.confidence * 100).roundToInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF81D4FA)
+                        )
+                        Text(
+                            text = "±%.1fm".format(ap.errorRadiusM),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFB0BEC5)
+                        )
+                    }
+                }
+            }
+        } else {
+            // --- Unselected: Sleek, compact, non-intrusive AR badge ---
+            // Center Pin
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .offset((-6).dp, (-6).dp)
+                    .background(
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0xFF4CAF50)
+                            ap.confidence >= 0.45 -> Color(0xFFFF9800)
+                            else -> Color(0xFFF44336)
+                        },
+                        shape = CircleShape
+                    )
+                    .border(2.dp, Color.White, CircleShape)
+            )
+
+            // Sleek mini pill badge
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xDD111827),
+                border = borderCardStroke(
+                    when {
                         ap.confidence >= 0.75 -> Color(0x994CAF50)
                         ap.confidence >= 0.45 -> Color(0x99FF9800)
                         else -> Color(0x99F44336)
-                    },
-                    shape = CircleShape
-                )
-        )
-
-        // --- Center AP Pin Point ---
-        Box(
-            modifier = Modifier
-                .size(14.dp)
-                .offset((-7).dp, (-7).dp)
-                .background(Color.White, CircleShape)
-                .border(3.dp, if (ap.isSelected) Color.Yellow else Color(0xFF00E5FF), CircleShape)
-        )
-
-        // --- Floating Billboard HUD Card ---
-        Card(
-            shape = RoundedCornerShape(10.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (ap.isSelected) Color(0xDD002244) else Color(0xDD111827)
-            ),
-            border = if (ap.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x55FFFFFF)),
-            modifier = Modifier
-                .offset(x = (-80).dp, y = (-125).dp)
-                .width(170.dp)
-                .clickable { onSelect() }
-        ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // SSID
+                    }
+                ),
+                modifier = Modifier
+                    .offset(x = 8.dp, y = (-12).dp)
+                    .clickable { onSelect() }
+            ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                 ) {
+                    Text(text = "📶", fontSize = 10.sp)
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
-                        text = "📶",
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = ap.ssid,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                // Real Phone RSSI
-                val phoneRssi = ap.phoneRssiDbm
-                Text(
-                    text = if (phoneRssi != null) "● $phoneRssi dBm (phone)" else "● No local signal",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (phoneRssi != null && phoneRssi > -65) Color(0xFF4CAF50) else Color(0xFFFFB74D),
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                // Distance
-                Text(
-                    text = ap.distanceToUserM?.let { "~%.1f m away".format(it) } ?: "Estimating distance...",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.LightGray
-                )
-
-                // Confidence & Accuracy
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Conf: ${(ap.confidence * 100).roundToInt()}%",
+                        text = ap.ssid.ifEmpty { "AP" }.take(12),
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF81D4FA)
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
                     )
-                    Text(
-                        text = "±%.1fm".format(ap.errorRadiusM),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFB0BEC5)
-                    )
+                    ap.distanceToUserM?.let { d ->
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "• %.1fm".format(d),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF81D4FA)
+                        )
+                    }
                 }
             }
         }
@@ -802,13 +970,14 @@ fun OffScreenDirectionIndicator(
     ap: AccessPointUIState,
     onClick: () -> Unit
 ) {
-    val density = LocalDensity.current
-    val x = screenPoint.screenX
-    val y = screenPoint.screenY
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
+    val x = screenPoint.screenX.roundToInt()
+    val y = screenPoint.screenY.roundToInt()
+    val angle = if (screenPoint.edgeAngleDegrees.isNaN() || screenPoint.edgeAngleDegrees.isInfinite()) 0f else screenPoint.edgeAngleDegrees
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .offset { IntOffset(x - 45, y - 25) }
             .background(Color(0xDDFF9800), RoundedCornerShape(16.dp))
             .clickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -819,7 +988,7 @@ fun OffScreenDirectionIndicator(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Black,
-                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+                modifier = Modifier.rotate(angle)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
@@ -845,6 +1014,7 @@ fun TopStatusBar(
     hubsCount: Int,
     uncalibratedHubsCount: Int,
     isCalibrated: Boolean,
+    anchorId: String? = null,
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
     onOpenHubs: () -> Unit,
@@ -855,72 +1025,161 @@ fun TopStatusBar(
 
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xCC000000)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xEE111827)),
+        border = borderCardStroke(Color(0x44FFFFFF)),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .statusBarsPadding()
+            .padding(top = 10.dp, start = 12.dp, end = 12.dp, bottom = 4.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
-            // Server connection badge
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .background(
-                            color = when (connectionStatus) {
-                                ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
-                                ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0xFFFF9800)
-                                else -> Color(0xFFF44336)
-                            },
-                            shape = CircleShape
+            // Row 1: Connection status badge & Telemetry (APs / Hubs / Scan age)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Connection badge
+                Surface(
+                    color = when (connectionStatus) {
+                        ConnectionStatus.CONNECTED -> Color(0x334CAF50)
+                        ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0x33FF9800)
+                        else -> Color(0x33F44336)
+                    },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    color = when (connectionStatus) {
+                                        ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
+                                        ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0xFFFF9800)
+                                        else -> Color(0xFFF44336)
+                                    },
+                                    shape = CircleShape
+                                )
                         )
-                )
-                Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = when (connectionStatus) {
+                                ConnectionStatus.CONNECTED -> "ONLINE"
+                                ConnectionStatus.CONNECTING -> "CONNECTING"
+                                ConnectionStatus.RECONNECTING -> "RETRYING"
+                                else -> "OFFLINE"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                // AP Counts & Hubs Count
                 Text(
-                    text = connectionStatus.name,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount • $hubsCount Hubs (${scanAgeSec}s)" else "$hubsCount Hubs Active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE0E0E0),
+                    fontWeight = FontWeight.Medium
                 )
             }
 
-            // AP Counts & Hubs Count
-            Text(
-                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount | Hubs: $hubsCount (${scanAgeSec}s)" else "Hubs: $hubsCount",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray
-            )
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Buttons
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onOpenHubs, modifier = Modifier.size(32.dp)) {
-                    BadgedBox(badge = {
-                        if (uncalibratedHubsCount > 0) {
-                            Badge(containerColor = Color(0xFFFF9800)) {
-                                Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
-                            }
-                        }
-                    }) {
-                        Text(text = "💻", fontSize = 18.sp)
+            // Row 2: Quick Calibration Pill & Action Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Calibration Status Pill (Clickable)
+                Surface(
+                    color = if (isCalibrated) Color(0x3300E5FF) else Color(0x33FF9800),
+                    shape = RoundedCornerShape(8.dp),
+                    border = borderCardStroke(if (isCalibrated) Color(0x8800E5FF) else Color(0x88FF9800)),
+                    modifier = Modifier.clickable { onOpenCalibration() }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = when {
+                                !isCalibrated -> "📍 Tap to Align AR"
+                                anchorId != null && anchorId != "ORIGIN" -> "📍 Aligned: $anchorId"
+                                else -> "🧭 Origin Anchored"
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isCalibrated) Color(0xFF00E5FF) else Color(0xFFFFB74D)
+                        )
                     }
                 }
-                IconButton(onClick = onOpenCalibration, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🧭", fontSize = 18.sp)
-                }
-                IconButton(onClick = onOpenAPList, modifier = Modifier.size(32.dp)) {
-                    Text(text = "📋", fontSize = 18.sp)
-                }
-                IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
-                    Text(text = "⚙️", fontSize = 18.sp)
-                }
-                IconButton(onClick = onToggleDebug, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🐞", fontSize = 18.sp)
+
+                // Action Buttons
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Hubs Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x337C4DFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenHubs() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        BadgedBox(badge = {
+                            if (uncalibratedHubsCount > 0) {
+                                Badge(containerColor = Color(0xFFFF9800)) {
+                                    Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
+                                }
+                            }
+                        }) {
+                            Text(text = "💻", fontSize = 16.sp)
+                        }
+                    }
+
+                    // AP List Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenAPList() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "📋", fontSize = 16.sp)
+                    }
+
+                    // Settings Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenSettings() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "⚙️", fontSize = 16.sp)
+                    }
+
+                    // Debug Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onToggleDebug() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "🐞", fontSize = 16.sp)
+                    }
                 }
             }
         }
@@ -1379,69 +1638,114 @@ fun HubLocationMarkerOverlay(
     hub: HubUIState,
     onSelect: () -> Unit
 ) {
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
     val density = LocalDensity.current
+    val sx = screenPoint.screenX.roundToInt()
+    val sy = screenPoint.screenY.roundToInt()
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+            .offset { IntOffset(sx, sy) }
     ) {
-        // --- Center Hub Pin Point (Purple glowing beacon) ---
-        Box(
-            modifier = Modifier
-                .size(16.dp)
-                .offset((-8).dp, (-8).dp)
-                .background(Color.White, CircleShape)
-                .border(3.dp, if (hub.isSelected) Color.Yellow else Color(0xFF9C27B0), CircleShape)
-        )
+        if (hub.isSelected) {
+            // --- Center Hub Pin Point (Selected) ---
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .offset((-8).dp, (-8).dp)
+                    .background(Color.White, CircleShape)
+                    .border(3.dp, Color.Yellow, CircleShape)
+            )
 
-        // --- Floating Billboard HUD Card ---
-        Card(
-            shape = RoundedCornerShape(10.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (hub.isSelected) Color(0xDD3A1C5A) else Color(0xDD1E1035)
-            ),
-            border = if (hub.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x999C27B0)),
-            modifier = Modifier
-                .offset(x = (-80).dp, y = (-110).dp)
-                .width(170.dp)
-                .clickable { onSelect() }
-        ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // Hub Name / ID
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            // --- Floating Billboard HUD Card ---
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xEE3A1C5A)
+                ),
+                border = borderCardStroke(Color.Yellow),
+                modifier = Modifier
+                    .offset(x = (-80).dp, y = (-120).dp)
+                    .width(170.dp)
+                    .clickable { onSelect() }
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    // Hub Name / ID
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "💻",
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = hub.hubId,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Distance
                     Text(
-                        text = "💻",
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = hub.hubId,
-                        style = MaterialTheme.typography.titleSmall,
+                        text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1
+                        color = Color(0xFFCE93D8)
+                    )
+
+                    // Status & Observation Count
+                    Text(
+                        text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
                     )
                 }
+            }
+        } else {
+            // --- Unselected: Sleek, compact purple badge ---
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .offset((-6).dp, (-6).dp)
+                    .background(Color(0xFF9C27B0), CircleShape)
+                    .border(2.dp, Color.White, CircleShape)
+            )
 
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Distance
-                Text(
-                    text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFCE93D8)
-                )
-
-                // Status & Observation Count
-                Text(
-                    text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
-                )
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xDD1E1035),
+                border = borderCardStroke(Color(0x999C27B0)),
+                modifier = Modifier
+                    .offset(x = 8.dp, y = (-12).dp)
+                    .clickable { onSelect() }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text(text = "💻", fontSize = 10.sp)
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = hub.hubId,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    hub.distanceToUserM?.let { d ->
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "• %.1fm".format(d),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFCE93D8)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1457,12 +1761,14 @@ fun HubOffScreenDirectionIndicator(
     hub: HubUIState,
     onClick: () -> Unit
 ) {
-    val x = screenPoint.screenX
-    val y = screenPoint.screenY
+    if (screenPoint.screenX.isNaN() || screenPoint.screenY.isNaN() || screenPoint.screenX < -1000f || screenPoint.screenY < -1000f) return
+    val x = screenPoint.screenX.roundToInt()
+    val y = screenPoint.screenY.roundToInt()
+    val angle = if (screenPoint.edgeAngleDegrees.isNaN() || screenPoint.edgeAngleDegrees.isInfinite()) 0f else screenPoint.edgeAngleDegrees
 
     Box(
         modifier = Modifier
-            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .offset { IntOffset(x - 45, y - 25) }
             .background(Color(0xDD9C27B0), RoundedCornerShape(16.dp))
             .clickable { onClick() }
             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -1473,7 +1779,7 @@ fun HubOffScreenDirectionIndicator(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White,
-                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+                modifier = Modifier.rotate(angle)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
@@ -1499,9 +1805,14 @@ fun VenueHubsBottomSheet(
     cameraZ: Float,
     transformer: CoordinateTransformer,
     onAnchorHub: (hubId: String, sX: Double, sY: Double, sZ: Double) -> Unit,
+    onAlignArToHub: (HubUIState) -> Unit,
     onSelectHub: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val stationaryHubs = remember(hubs) {
+        hubs.filter { !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
+    }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -1514,14 +1825,14 @@ fun VenueHubsBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Venue Wi-Fi Hubs (${hubs.size})",
+                    text = "Venue Wi-Fi Hubs (${stationaryHubs.size})",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "${hubs.count { it.isCalibrated }}/${hubs.size} Calibrated",
+                    text = "${stationaryHubs.count { it.isCalibrated }}/${stationaryHubs.size} Calibrated",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (hubs.all { it.isCalibrated } && hubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
+                    color = if (stationaryHubs.all { it.isCalibrated } && stationaryHubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
                     fontWeight = FontWeight.SemiBold
                 )
             }
@@ -1529,14 +1840,14 @@ fun VenueHubsBottomSheet(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location.",
+                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location, or tap '📍 Align AR' to synchronize the room's coordinate system with that laptop.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            if (hubs.isEmpty()) {
+            if (stationaryHubs.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1562,13 +1873,14 @@ fun VenueHubsBottomSheet(
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxHeight(0.6f)) {
-                    items(hubs) { hub ->
+                    items(stationaryHubs) { hub ->
                         HubItemCard(
                             hub = hub,
                             onAnchorHere = {
                                 val sPose = transformer.arToServer(cameraX, cameraY, cameraZ)
                                 onAnchorHub(hub.hubId, sPose.x, sPose.y, sPose.z)
                             },
+                            onAlignArToHub = { onAlignArToHub(hub) },
                             onSelect = { onSelectHub(hub.hubId) }
                         )
                     }
@@ -1582,6 +1894,7 @@ fun VenueHubsBottomSheet(
 fun HubItemCard(
     hub: HubUIState,
     onAnchorHere: () -> Unit,
+    onAlignArToHub: () -> Unit,
     onSelect: () -> Unit
 ) {
     Card(
@@ -1669,15 +1982,22 @@ fun HubItemCard(
                 if (hub.isCalibrated) {
                     OutlinedButton(
                         onClick = onSelect,
-                        modifier = Modifier.padding(end = 8.dp)
+                        modifier = Modifier.padding(end = 6.dp)
                     ) {
-                        Text("Highlight in AR")
+                        Text("Highlight")
+                    }
+                    OutlinedButton(
+                        onClick = onAlignArToHub,
+                        modifier = Modifier.padding(end = 6.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF2E7D32))
+                    ) {
+                        Text("📍 Align AR")
                     }
                     Button(
                         onClick = onAnchorHere,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
                     ) {
-                        Text("Re-Anchor Here")
+                        Text("Re-Anchor")
                     }
                 } else {
                     Button(

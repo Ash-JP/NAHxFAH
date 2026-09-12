@@ -51,8 +51,52 @@ class ServerWebSocketManager(private val context: Context) {
     private val _apUpdates = MutableSharedFlow<APUpdatePayload>(replay = 50, extraBufferCapacity = 100)
     val apUpdates: SharedFlow<APUpdatePayload> = _apUpdates.asSharedFlow()
 
-    private val _hubsState = MutableStateFlow<Map<String, HubUIState>>(emptyMap())
+    private val hubsPrefs = context.getSharedPreferences("wifi_hunter_hubs_cache", Context.MODE_PRIVATE)
+
+    private val _hubsState = MutableStateFlow<Map<String, HubUIState>>(loadCachedHubs())
     val hubsState: StateFlow<Map<String, HubUIState>> = _hubsState.asStateFlow()
+
+    private fun loadCachedHubs(): Map<String, HubUIState> {
+        return try {
+            val raw = hubsPrefs.getString("cached_hubs_json", null) ?: return emptyMap()
+            val list = json.decodeFromString<List<HubPayload>>(raw)
+            list.associate { hub ->
+                hub.hubId to HubUIState(
+                    hubId = hub.hubId,
+                    deviceType = hub.deviceType,
+                    platform = hub.platform,
+                    version = hub.version,
+                    status = hub.status,
+                    serverPosition = hub.position,
+                    observationCount = hub.observationCount,
+                    isCalibrated = hub.position != null && (hub.position.x != 0.0 || hub.position.y != 0.0 || hub.position.z != 0.0),
+                    lastSeen = hub.lastSeen
+                )
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun persistCachedHubs(hubs: Map<String, HubUIState>) {
+        try {
+            val payloads = hubs.values.map {
+                HubPayload(
+                    hubId = it.hubId,
+                    deviceType = it.deviceType,
+                    platform = it.platform,
+                    version = it.version,
+                    status = it.status,
+                    position = it.serverPosition,
+                    observationCount = it.observationCount,
+                    lastSeen = it.lastSeen
+                )
+            }
+            hubsPrefs.edit().putString("cached_hubs_json", json.encodeToString(payloads)).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to persist hubs cache: ${e.message}")
+        }
+    }
 
     private val _lastMessageTime = MutableStateFlow(0L)
     val lastMessageTime: StateFlow<Long> = _lastMessageTime.asStateFlow()
@@ -172,6 +216,19 @@ class ServerWebSocketManager(private val context: Context) {
         val payload = json.encodeToString(registerMsg)
         webSocket?.send(payload)
         Log.d(TAG, "Sent mobile_register: $payload")
+
+        // Sync any cached calibrated hubs to ensure server DB is updated
+        _hubsState.value.values.filter { it.isCalibrated }.forEach { hub ->
+            val updateMsg = UpdateHubPositionMessage(
+                hubId = hub.hubId,
+                coordinateSystem = "local",
+                x = hub.serverPositionX,
+                y = hub.serverPositionY,
+                z = hub.serverPositionZ
+            )
+            webSocket?.send(json.encodeToString(updateMsg))
+            Log.d(TAG, "Synced cached hub ${hub.hubId} position to server: ($updateMsg)")
+        }
     }
 
     private fun startHeartbeat() {
@@ -214,6 +271,7 @@ class ServerWebSocketManager(private val context: Context) {
                         )
                     }
                     _hubsState.value = map
+                    persistCachedHubs(map)
                     Log.i(TAG, "Received hubs snapshot with ${map.size} venue hubs")
                 }
                 "hub_update" -> {
@@ -238,6 +296,7 @@ class ServerWebSocketManager(private val context: Context) {
                         isSelected = existing?.isSelected ?: false
                     )
                     _hubsState.value = current
+                    persistCachedHubs(current)
                     Log.i(TAG, "Venue hub updated: ${hub.hubId} (status: ${hub.status}, pos: ${hub.position})")
                 }
                 "mobile_registered" -> {
@@ -285,6 +344,26 @@ class ServerWebSocketManager(private val context: Context) {
             lastUpdatedMs = System.currentTimeMillis()
         )
         _hubsState.value = current
+        persistCachedHubs(current)
+    }
+
+    /**
+     * Saves or updates a spatial anchor on the server.
+     */
+    fun sendSaveAnchor(anchorId: String, name: String = anchorId, x: Double, y: Double, z: Double, cs: String = "local") {
+        val msg = SaveAnchorMessage(
+            anchorId = anchorId,
+            name = name,
+            x = x,
+            y = y,
+            z = z,
+            coordinateSystem = cs
+        )
+        val payload = json.encodeToString(msg)
+        if (_connectionState.value == ConnectionStatus.CONNECTED) {
+            webSocket?.send(payload)
+            Log.i(TAG, "Sent save_anchor for $anchorId: $payload")
+        }
     }
 
     /**

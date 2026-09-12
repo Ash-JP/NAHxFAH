@@ -150,6 +150,17 @@ data class UpdateHubPositionMessage(
     val z: Double
 )
 
+@Serializable
+data class SaveAnchorMessage(
+    val type: String = "save_anchor",
+    @SerialName("anchor_id") val anchorId: String,
+    val name: String = "",
+    val x: Double,
+    val y: Double,
+    val z: Double,
+    @SerialName("coordinate_system") val coordinateSystem: String = "local"
+)
+
 data class HubUIState(
     val hubId: String,
     val deviceType: String = "laptop",

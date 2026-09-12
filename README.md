@@ -2,7 +2,7 @@
 
 
 
-# [Project Name] 🎯
+# WIFI HUNTER AR 🎯
 
 
 ## Basic Details
@@ -10,88 +10,116 @@
 
 
 ### Team Members
-- Team Lead: [Name] - [College]
-- Member 2: [Name] - [College]
-- Member 3: [Name] - [College]
+- Team Lead: Sreedev S S - College of Engineering Attingal
+- Member 2: Aashray J Pramod - College of Engineering Attingal
 
 ### Project Description
-[2-3 lines about what your project does]
+WIFI HUNTER AR is a distributed indoor spatial intelligence and Augmented Reality platform that turns ordinary venue laptops into a synchronized radar network. It passively captures 2.4 GHz and 5 GHz radio frequencies, computes 3D log-distance trilateration in real-time via a Go backend, and renders live holographic Wi-Fi access points floating in physical space on an Android ARCore app.
 
 ### The Problem (that doesn't exist)
-[What ridiculous problem are you solving?]
+Have you ever stared blankly at your smartphone's Wi-Fi signal dropping to one bar while sitting in a room, desperately wishing you possessed superhuman laser-vision to literally see the invisible electromagnetic radio waves bouncing off the walls and hunt down the exact physical location of the rogue router like a cybernetic Ghostbuster?
 
 ### The Solution (that nobody asked for)
-[How are you solving it? Keep it fun!]
+WIFI HUNTER AR solves this non-existent crisis by deploying laptops into the four corners of your room to form a high-precision RF sonar grid. The laptops continuously scan BSSIDs and RSSI signals via native Windows WLAN APIs, stream them to a high-concurrency Go server that computes 3D spatial trilateration, and project floating Augmented Reality holograms directly onto your Android phone's camera feed so you can literally walk up to the invisible Wi-Fi signal and look it in the eye!
 
 ## Technical Details
 ### Technologies/Components Used
 For Software:
-- [Languages used]
-- [Frameworks used]
-- [Libraries used]
-- [Tools used]
+- Languages: Go (1.24), Kotlin (1.9+), Python (3.11+), SQL
+- Frameworks: Android Jetpack Compose, Google ARCore, Sceneview (Google Filament 3D Engine), Gorilla WebSocket, Chi Router
+- Libraries: Windows Native Wifi API (WlanAPI via ctypes), pgx/v5 (PostgreSQL Driver), kotlinx.coroutines, kotlinx.serialization
+- Tools: Docker & Docker Compose, Android Studio, Gradle, PostgreSQL 16, Git
 
 For Hardware:
-- [List main components]
-- [List specifications]
-- [List tools required]
+- 4x Windows Laptops / Mini-PCs (acting as stationary corner venue scanning radar hubs)
+- 1x Android Smartphone running Android 10+ with Google Play Services for AR (ARCore) support
+- Dual-band 802.11ac/ax Wi-Fi adapters for multi-frequency (2.4 GHz & 5 GHz) RSSI capture
+- Local Wi-Fi Router / Access Points to detect and localize
 
 ### Implementation
 For Software:
 # Installation
-[commands]
+```bash
+# 1. Clone repository
+git clone https://github.com/MTCodes01/NAHxFAH.git
+cd NAHxFAH
+
+# 2. Start PostgreSQL & Go Backend Server via Docker
+docker compose up -d --build
+
+# 3. Setup Python Hub Agent on Venue Laptops
+cd hub
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
+
+# 4. Build Android AR App (in wifiapp/)
+cd ../wifiapp
+$env:JAVA_HOME = "E:\Android Studio\jbr" # or your local JDK path
+.\gradlew.bat assembleDebug
+```
 
 # Run
-[commands]
+```bash
+# 1. Run Backend Server (Docker Compose)
+docker compose up -d
+
+# 2. Run Hub Agent on each Corner Laptop (connects to server LAN IP)
+cd hub
+python main.py
+
+# 3. Launch Android AR App on your phone
+# Install wifiapp/app/build/outputs/apk/debug/app-debug.apk
+# Open WIFI HUNTER AR, connect to ws://<SERVER_IP>:8000/ws, and align AR at Corner 1!
+```
 
 ### Project Documentation
 For Software:
 
 # Screenshots (Add at least 3)
-![Screenshot1](Add screenshot 1 here with proper name)
-*Add caption explaining what this shows*
+![Screenshot1](docs/images/screenshot1_ar_view.png)
+*Augmented Reality HUD displaying floating 3D holographic Wi-Fi access points, real-time RSSI, estimated distance, and venue corner hub markers*
 
-![Screenshot2](Add screenshot 2 here with proper name)
-*Add caption explaining what this shows*
+![Screenshot2](docs/images/screenshot2_dashboard.jpg)
+*Desktop spatial telemetry web dashboard displaying 3D localized wireframe grid, RSSI spectrum graphs, and live access point tracking*
 
-![Screenshot3](Add screenshot 3 here with proper name)
-*Add caption explaining what this shows*
+![Screenshot3](docs/images/screenshot3_hubs.jpg)
+*Venue Hubs Management sheet on Android mobile showing 4 active corner radar laptops and 1-tap physical AR world alignment*
 
 # Diagrams
-![Workflow](Add your workflow/architecture diagram here)
-*Add caption explaining your workflow*
+![Workflow](docs/images/workflow.svg)
+*End-to-end system architecture: Windows Hub agents capturing RSSI -> Central Go Server trilateration engine -> PostgreSQL storage -> Android ARCore real-time 3D overlay*
 
 For Hardware:
 
 # Schematic & Circuit
-![Circuit](Add your circuit diagram here)
-*Add caption explaining connections*
+![Circuit](docs/images/circuit.svg)
+*Hardware interconnect and signal flow: Omnidirectional RF beaconing, 4-corner laptop Wi-Fi NICs, local LAN WebSocket multiplexing, and Android AR phone receiver*
 
-![Schematic](Add your schematic diagram here)
-*Add caption explaining the schematic*
+![Schematic](docs/images/schematic.svg)
+*3D RF multi-lateration geometric schematic: Log-distance path loss propagation model, least-squares likelihood surface, and ARCore world transformation*
 
 # Build Photos
-![Components](Add photo of your components here)
-*List out all components shown*
+![Components](docs/images/components.jpg)
+*Physical hardware deployment components: Android AR smartphone, dual scanning laptops running hub agents, 802.11 Wi-Fi router, and dual-band USB Wi-Fi adapters*
 
-![Build](Add photos of build process here)
-*Explain the build steps*
+![Build](docs/images/build.jpg)
+*Physical room deployment: 4 laptop hub radar stations positioned in the 4 corners of the room synchronized over local LAN*
 
-![Final](Add photo of final product here)
-*Explain the final build*
+![Final](docs/images/final.jpg)
+*Live AR demonstration: First-person augmented reality camera view with floating holographic direction markers pointing directly to the hidden Wi-Fi router*
 
 ### Project Demo
 # Video
 [Add your demo video link here]
-*Explain what the video demonstrates*
+*Live demonstration of 4-corner laptop radar synchronization, venue calibration, and finding hidden Wi-Fi access points in AR*
 
 # Additional Demos
 [Add any extra demo materials/links]
 
 ## Team Contributions
-- [Name 1]: [Specific contributions]
-- [Name 2]: [Specific contributions]
-- [Name 3]: [Specific contributions]
+- Sreedev S S: Go backend architecture, 3D grid localization engine, WebSocket hub manager, and Android ARCore mobile client
+- Aashray J Pramod: Windows WLAN native hub agent, signal processing (EMA/MAD), telemetry web dashboard, and venue multi-hub calibration testing
 
 ---
 Made with ❤️ at TinkerHub Useless Projects 

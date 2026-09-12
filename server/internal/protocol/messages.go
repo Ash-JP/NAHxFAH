@@ -35,6 +35,7 @@ const (
 	MsgMobilePose             MessageType = "mobile_pose"
 	MsgMobileWiFiObservations MessageType = "mobile_wifi_observations"
 	MsgUpdateHubPosition      MessageType = "update_hub_position"
+	MsgSaveAnchor             MessageType = "save_anchor"
 
 	// Server → Mobile & Dashboard
 	MsgHubsSnapshot     MessageType = "hubs_snapshot"
@@ -290,6 +291,17 @@ type ServerStatusMessage struct {
 	ActiveAPs       int         `json:"active_aps"`
 	LocalizedAPs    int         `json:"localized_aps"`
 	DatabaseStatus  string      `json:"database_status"`
+}
+
+// SaveAnchorMessage saves or updates a spatial anchor from mobile AR.
+type SaveAnchorMessage struct {
+	Type             MessageType `json:"type"`
+	AnchorID         string      `json:"anchor_id"`
+	Name             string      `json:"name,omitempty"`
+	X                float64     `json:"x"`
+	Y                float64     `json:"y"`
+	Z                float64     `json:"z"`
+	CoordinateSystem string      `json:"coordinate_system,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
