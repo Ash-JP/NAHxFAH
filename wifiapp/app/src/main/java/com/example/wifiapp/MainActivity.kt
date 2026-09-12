@@ -43,10 +43,14 @@ import com.example.wifiapp.models.*
 import com.example.wifiapp.network.ServerWebSocketManager
 import com.example.wifiapp.wifi.WifiScanner
 import com.google.ar.core.TrackingState
+import androidx.compose.ui.graphics.toArgb
 import io.github.sceneview.ar.ARScene
 import io.github.sceneview.node.Node
+import io.github.sceneview.node.SphereNode
 import io.github.sceneview.rememberEngine
+import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelLoader
+import io.github.sceneview.math.Position
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -232,6 +236,7 @@ fun MainARScreen(
     // SceneView hooks
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
+    val materialLoader = rememberMaterialLoader(engine)
     val childNodes = remember { mutableStateListOf<Node>() }
 
     // Auto-dispatch incoming server AP updates into ARMarkerManager
@@ -244,7 +249,19 @@ fun MainARScreen(
     // Auto-update marker manager with local Wi-Fi scans and upload to server
     LaunchedEffect(localScans) {
         if (localScans.isNotEmpty()) {
-            markerManager.onLocalWifiScanResults(localScans)
+            val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
+            val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
+            val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
+
+            markerManager.onLocalWifiScanResults(
+                scans = localScans,
+                camX = cameraPoseX,
+                camY = cameraPoseY,
+                camZ = cameraPoseZ,
+                fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
+                fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
+                fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
+            )
             // Send mobile Wi-Fi observations + calibrated server pose to server
             val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
             webSocketManager.sendWifiObservations(localScans, serverPose)
@@ -304,6 +321,22 @@ fun MainARScreen(
                     // Update distances from camera to estimated APs
                     markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
 
+                    // If we have local scans and any AP lacks an initial 3D position, predict it now
+                    if (localScans.isNotEmpty() && accessPointsMap.values.any { !it.hasSpatialPosition }) {
+                        val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
+                        val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
+                        val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
+                        markerManager.onLocalWifiScanResults(
+                            scans = localScans,
+                            camX = cameraPoseX,
+                            camY = cameraPoseY,
+                            camZ = cameraPoseZ,
+                            fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
+                            fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
+                            fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
+                        )
+                    }
+
                     // Dispatch 10 Hz pose to server
                     webSocketManager.sendPose(
                         cameraPoseX, cameraPoseY, cameraPoseZ,
@@ -315,10 +348,37 @@ fun MainARScreen(
         )
 
         // --- 2. AR PREDICTED LOCATION MARKERS & UNCERTAINTY REGIONS ---
-        val localizedAPs = accessPointsMap.values.filter { it.isLocalized && it.arPositionX != null }
+        val activeAPs = accessPointsMap.values
+            .filter { it.hasSpatialPosition }
+            .sortedByDescending { it.phoneRssiDbm ?: -999 }
+            .take(12)
         val selectedAP = accessPointsMap[selectedBssid]
 
-        for (ap in localizedAPs) {
+        // Place real 3D glowing spheres in the ARCore camera feed
+        LaunchedEffect(activeAPs) {
+            childNodes.clear()
+            for (ap in activeAPs) {
+                val arX = ap.arPositionX ?: continue
+                val arY = ap.arPositionY ?: continue
+                val arZ = ap.arPositionZ ?: continue
+
+                val color = when {
+                    ap.confidence >= 0.75 -> Color(0xFF00E5FF).toArgb()
+                    ap.confidence >= 0.45 -> Color(0xFFFFB300).toArgb()
+                    else -> Color(0xFFFF5252).toArgb()
+                }
+                val mat = materialLoader.createColorInstance(color)
+                val sphere = SphereNode(
+                    engine = engine,
+                    radius = 0.15f,
+                    materialInstance = mat
+                )
+                sphere.position = Position(arX, arY, arZ)
+                childNodes.add(sphere)
+            }
+        }
+
+        for (ap in activeAPs) {
             val arX = ap.arPositionX ?: continue
             val arY = ap.arPositionY ?: continue
             val arZ = ap.arPositionZ ?: continue
@@ -355,7 +415,7 @@ fun MainARScreen(
             connectionStatus = connectionStatus,
             lastScanTimeMs = lastScanTime,
             apCount = accessPointsMap.size,
-            localizedCount = localizedAPs.size,
+            localizedCount = activeAPs.size,
             isCalibrated = calibrationState.isCalibrated,
             onOpenSettings = { showSettingsDialog = true },
             onOpenCalibration = { showCalibrationDialog = true },
@@ -388,7 +448,7 @@ fun MainARScreen(
                 calibration = calibrationState,
                 connection = connectionStatus,
                 apCount = accessPointsMap.size,
-                localizedCount = localizedAPs.size,
+                localizedCount = activeAPs.size,
                 scanCount = localScans.size,
                 modifier = Modifier
                     .align(Alignment.TopStart)
