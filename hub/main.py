@@ -169,7 +169,7 @@ def cmd_test_server() -> None:
         try:
             async def _connect_and_test() -> None:
                 async with websockets.connect(cfg.server_url) as ws:
-                    # Send register
+                    pos = cfg.position
                     msg = {
                         "type": "hub_register",
                         "hub_id": identity.hub_id,
@@ -177,6 +177,12 @@ def cmd_test_server() -> None:
                         "platform": "windows",
                         "version": VERSION,
                         "api_key": cfg.api_key,
+                        "position": {
+                            "coordinate_system": pos.coordinate_system,
+                            "x": pos.x,
+                            "y": pos.y,
+                            "z": pos.z,
+                        },
                     }
                     await ws.send(json.dumps(msg))
 
@@ -188,12 +194,16 @@ def cmd_test_server() -> None:
                         print(f"SUCCESS: Server responded with hub_registered")
                         print(f"  Server time: {resp.get('server_time')}")
                         print(f"  Status:      {resp.get('status')}")
+                        print(f"  Position:    X={pos.x}, Y={pos.y}, Z={pos.z}")
+                        return
                     elif resp.get("type") == "error":
                         print(f"FAILED: Server returned error")
                         print(f"  Code:    {resp.get('code')}")
                         print(f"  Message: {resp.get('message')}")
+                        return
                     else:
                         print(f"UNEXPECTED: Server returned {resp.get('type')}")
+                        return
 
             await asyncio.wait_for(_connect_and_test(), timeout=10)
 

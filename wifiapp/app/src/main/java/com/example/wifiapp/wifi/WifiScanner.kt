@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
 class WifiScanner(private val context: Context) {
     companion object {
         private const val TAG = "WifiScanner"
-        private const val SCAN_INTERVAL_MS = 6000L // 6s interval to respect Android throttling
+        private const val SCAN_INTERVAL_MS = 3000L // 3s polling for fast spatial responsiveness
     }
 
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -69,10 +69,11 @@ class WifiScanner(private val context: Context) {
         // Process any cached scan results immediately
         processScanResults()
 
-        // Start periodic scan loop
+        // Start periodic scan and poll loop
         scanJob?.cancel()
         scanJob = scope.launch {
             while (isActive) {
+                processScanResults()
                 triggerScan()
                 delay(SCAN_INTERVAL_MS)
             }

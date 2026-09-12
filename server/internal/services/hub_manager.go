@@ -13,9 +13,10 @@ import (
 
 // HubState holds the in-memory runtime state for a connected hub.
 type HubState struct {
-	Hub      *models.Hub
-	LastSeen time.Time
-	Status   models.HubStatus
+	Hub              *models.Hub
+	LastSeen         time.Time
+	Status           models.HubStatus
+	ObservationCount int
 }
 
 // HubManager manages connected hub state with thread-safe access.
@@ -49,6 +50,18 @@ func (hm *HubManager) Register(ctx context.Context, hub *models.Hub) error {
 	hub.Status = models.HubStatusOnline
 	hub.LastSeen = &now
 	hub.CoordinateSystem = "local"
+
+	// Preserve existing position from DB if not explicitly provided in registration
+	if hub.X == nil {
+		if existing, err := hm.hubRepo.GetByID(ctx, hub.HubID); err == nil && existing != nil {
+			hub.X = existing.X
+			hub.Y = existing.Y
+			hub.Z = existing.Z
+			if existing.CoordinateSystem != "" {
+				hub.CoordinateSystem = existing.CoordinateSystem
+			}
+		}
+	}
 
 	if err := hm.hubRepo.Upsert(ctx, hub); err != nil {
 		return err
@@ -113,9 +126,29 @@ func (hm *HubManager) GetState(hubID string) (*HubState, bool) {
 	if !ok {
 		return nil, false
 	}
-	// Return a copy to avoid data races
 	stateCopy := *state
 	return &stateCopy, true
+}
+
+// ListStates returns copies of all currently tracked hub states.
+func (hm *HubManager) ListStates() []*HubState {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+	res := make([]*HubState, 0, len(hm.hubs))
+	for _, s := range hm.hubs {
+		cpy := *s
+		res = append(res, &cpy)
+	}
+	return res
+}
+
+// IncrementObservations adds to the observation count for the given hub.
+func (hm *HubManager) IncrementObservations(hubID string, count int) {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	if state, ok := hm.hubs[hubID]; ok {
+		state.ObservationCount += count
+	}
 }
 
 // GetPosition returns the hub's current position if configured.

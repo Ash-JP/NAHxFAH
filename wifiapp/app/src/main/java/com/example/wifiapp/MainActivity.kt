@@ -54,6 +54,9 @@ import io.github.sceneview.math.Position
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import kotlin.math.atan2
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
@@ -210,12 +213,15 @@ fun MainARScreen(
     val connectionStatus by webSocketManager.connectionState.collectAsState()
     val accessPointsMap by markerManager.accessPoints.collectAsState()
     val selectedBssid by markerManager.selectedBssid.collectAsState()
+    val hubsMap by markerManager.hubs.collectAsState()
+    val selectedHubId by markerManager.selectedHubId.collectAsState()
     val calibrationState by calibrationManager.calibrationState.collectAsState()
     val localScans by wifiScanner.scanResults.collectAsState()
     val lastScanTime by wifiScanner.lastScanTimestamp.collectAsState()
 
     // Dialog sheets
     var showCalibrationDialog by remember { mutableStateOf(false) }
+    var showHubsSheet by remember { mutableStateOf(false) }
     var showAPListSheet by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDebugOverlay by remember { mutableStateOf(false) }
@@ -239,32 +245,41 @@ fun MainARScreen(
     val materialLoader = rememberMaterialLoader(engine)
     val childNodes = remember { mutableStateListOf<Node>() }
 
-    // Auto-dispatch incoming server AP updates into ARMarkerManager
+    // Pose history buffer for timestamp correlation (Section 30, 31)
+    val poseHistory = remember { PoseHistoryBuffer(maxDurationMs = 10_000L) }
+
+    // Movement-based spatial observation tracking
+    var lastDispatchX by remember { mutableFloatStateOf(0f) }
+    var lastDispatchY by remember { mutableFloatStateOf(0f) }
+    var lastDispatchZ by remember { mutableFloatStateOf(0f) }
+    var lastDispatchTimeMs by remember { mutableLongStateOf(0L) }
+
+    // Auto-dispatch incoming server AP and Hub updates into ARMarkerManager
     LaunchedEffect(Unit) {
-        webSocketManager.apUpdates.collectLatest { apUpdate ->
-            markerManager.onAPUpdateReceived(apUpdate)
+        launch {
+            webSocketManager.apUpdates.collectLatest { apUpdate ->
+                markerManager.onAPUpdateReceived(apUpdate)
+            }
+        }
+        launch {
+            webSocketManager.hubsState.collectLatest { hubs ->
+                markerManager.updateHubs(hubs)
+            }
         }
     }
 
     // Auto-update marker manager with local Wi-Fi scans and upload to server
     LaunchedEffect(localScans) {
         if (localScans.isNotEmpty()) {
-            val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
-            val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
-            val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
-
-            markerManager.onLocalWifiScanResults(
-                scans = localScans,
-                camX = cameraPoseX,
-                camY = cameraPoseY,
-                camZ = cameraPoseZ,
-                fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
-                fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
-                fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
-            )
-            // Send mobile Wi-Fi observations + calibrated server pose to server
-            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
-            webSocketManager.sendWifiObservations(localScans, serverPose)
+            markerManager.onLocalWifiScanResults(localScans)
+            if (cameraTrackingState == TrackingState.TRACKING) {
+                val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                webSocketManager.sendWifiObservations(localScans, serverPose)
+                lastDispatchX = cameraPoseX
+                lastDispatchY = cameraPoseY
+                lastDispatchZ = cameraPoseZ
+                lastDispatchTimeMs = System.currentTimeMillis()
+            }
         }
     }
 
@@ -278,6 +293,7 @@ fun MainARScreen(
             onSessionUpdated = { _, frame ->
                 val camera = frame.camera
                 val state = camera.trackingState
+                val previousState = cameraTrackingState
                 cameraTrackingState = state
 
                 if (state == TrackingState.TRACKING) {
@@ -290,6 +306,21 @@ fun MainARScreen(
                     cameraQy = q[1]
                     cameraQz = q[2]
                     cameraQw = q[3]
+
+                    // Record to pose history buffer for timestamp correlation
+                    poseHistory.addPose(
+                        TimestampedPose(
+                            timestampMs = System.currentTimeMillis(),
+                            x = cameraPoseX,
+                            y = cameraPoseY,
+                            z = cameraPoseZ,
+                            qx = cameraQx,
+                            qy = cameraQy,
+                            qz = cameraQz,
+                            qw = cameraQw,
+                            isTracking = true
+                        )
+                    )
 
                     // Capture projection and view matrices for 3D->2D billboard projection
                     val vm = FloatArray(16)
@@ -318,23 +349,29 @@ fun MainARScreen(
                         markerManager.recalculateArCoordinates()
                     }
 
-                    // Update distances from camera to estimated APs
+                    // Update distances from camera to estimated APs (Section 20: Euclidean distance)
                     markerManager.updateCameraDistances(cameraPoseX, cameraPoseY, cameraPoseZ)
 
-                    // If we have local scans and any AP lacks an initial 3D position, predict it now
-                    if (localScans.isNotEmpty() && accessPointsMap.values.any { !it.hasSpatialPosition }) {
-                        val fwdX = -2f * (cameraQx * cameraQz + cameraQw * cameraQy)
-                        val fwdY = 2f * (cameraQw * cameraQx - cameraQy * cameraQz)
-                        val fwdZ = -(1f - 2f * (cameraQx * cameraQx + cameraQy * cameraQy))
-                        markerManager.onLocalWifiScanResults(
-                            scans = localScans,
-                            camX = cameraPoseX,
-                            camY = cameraPoseY,
-                            camZ = cameraPoseZ,
-                            fwdX = if (fwdX == 0f && fwdZ == 0f) 0f else fwdX,
-                            fwdY = if (fwdX == 0f && fwdZ == 0f) 0f else fwdY,
-                            fwdZ = if (fwdX == 0f && fwdZ == 0f) -1f else fwdZ
-                        )
+                    // Section 7: Continuous observation dispatching as user moves through space
+                    if (localScans.isNotEmpty()) {
+                        val dx = cameraPoseX - lastDispatchX
+                        val dy = cameraPoseY - lastDispatchY
+                        val dz = cameraPoseZ - lastDispatchZ
+                        val distMoved = sqrt(dx * dx + dy * dy + dz * dz)
+                        val now = System.currentTimeMillis()
+                        val elapsedMs = now - lastDispatchTimeMs
+
+                        // Dispatch if: initial (0L), moved >= 0.5m, or periodically every 3s if moved >= 0.15m
+                        if (lastDispatchTimeMs == 0L || distMoved >= 0.5f || (elapsedMs >= 3000L && distMoved >= 0.15f)) {
+                            lastDispatchX = cameraPoseX
+                            lastDispatchY = cameraPoseY
+                            lastDispatchZ = cameraPoseZ
+                            lastDispatchTimeMs = now
+
+                            val serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ)
+                            webSocketManager.sendWifiObservations(localScans, serverPose)
+                            markerManager.onLocalWifiScanResults(localScans)
+                        }
                     }
 
                     // Dispatch 10 Hz pose to server
@@ -343,20 +380,32 @@ fun MainARScreen(
                         cameraQx, cameraQy, cameraQz, cameraQw,
                         state.name
                     )
+                } else if (state == TrackingState.STOPPED && previousState == TrackingState.TRACKING) {
+                    // Section 40: If ARCore tracking resets, invalidate calibration
+                    calibrationManager.resetCalibration()
+                    poseHistory.clear()
+                    lastDispatchTimeMs = 0L
                 }
             }
         )
 
         // --- 2. AR PREDICTED LOCATION MARKERS & UNCERTAINTY REGIONS ---
+        // Rule 38: Only render physical AR markers when localized by server with 3D coordinates
         val activeAPs = accessPointsMap.values
-            .filter { it.hasSpatialPosition }
+            .filter { it.isLocalized && it.hasSpatialPosition }
             .sortedByDescending { it.phoneRssiDbm ?: -999 }
             .take(12)
         val selectedAP = accessPointsMap[selectedBssid]
 
+        val calibratedHubs = hubsMap.values
+            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null }
+        val selectedHub = hubsMap[selectedHubId]
+
         // Place real 3D glowing spheres in the ARCore camera feed
-        LaunchedEffect(activeAPs) {
+        LaunchedEffect(activeAPs, calibratedHubs) {
             childNodes.clear()
+
+            // 1. Localized Access Points (cyan/amber/red based on confidence)
             for (ap in activeAPs) {
                 val arX = ap.arPositionX ?: continue
                 val arY = ap.arPositionY ?: continue
@@ -376,8 +425,25 @@ fun MainARScreen(
                 sphere.position = Position(arX, arY, arZ)
                 childNodes.add(sphere)
             }
+
+            // 2. Calibrated Venue Hubs (purple/violet beacons)
+            for (hub in calibratedHubs) {
+                val arX = hub.arPositionX ?: continue
+                val arY = hub.arPositionY ?: continue
+                val arZ = hub.arPositionZ ?: continue
+
+                val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
+                val sphere = SphereNode(
+                    engine = engine,
+                    radius = 0.20f,
+                    materialInstance = mat
+                )
+                sphere.position = Position(arX, arY, arZ)
+                childNodes.add(sphere)
+            }
         }
 
+        // 2D overlays for Access Points
         for (ap in activeAPs) {
             val arX = ap.arPositionX ?: continue
             val arY = ap.arPositionY ?: continue
@@ -394,18 +460,47 @@ fun MainARScreen(
             )
 
             if (screenPoint.isVisibleInFov) {
-                // Render on-screen AR Marker + Predicted Location Area
                 APLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     ap = ap,
                     onSelect = { markerManager.selectAP(ap.bssid) }
                 )
             } else if (ap.bssid == selectedBssid) {
-                // Off-screen Directional Indicator Arrow for selected AP
                 OffScreenDirectionIndicator(
                     screenPoint = screenPoint,
                     ap = ap,
                     onClick = { /* selected */ }
+                )
+            }
+        }
+
+        // 2D overlays for Venue Hubs
+        for (hub in calibratedHubs) {
+            val arX = hub.arPositionX ?: continue
+            val arY = hub.arPositionY ?: continue
+            val arZ = hub.arPositionZ ?: continue
+
+            val screenPoint = markerManager.projectToScreen(
+                posX = arX,
+                posY = arY,
+                posZ = arZ,
+                viewMatrix = viewMatrix,
+                projMatrix = projMatrix,
+                screenWidth = screenWidthPx,
+                screenHeight = screenHeightPx
+            )
+
+            if (screenPoint.isVisibleInFov) {
+                HubLocationMarkerOverlay(
+                    screenPoint = screenPoint,
+                    hub = hub,
+                    onSelect = { markerManager.selectHub(hub.hubId) }
+                )
+            } else if (hub.hubId == selectedHubId) {
+                HubOffScreenDirectionIndicator(
+                    screenPoint = screenPoint,
+                    hub = hub,
+                    onClick = { markerManager.selectHub(null) }
                 )
             }
         }
@@ -416,9 +511,12 @@ fun MainARScreen(
             lastScanTimeMs = lastScanTime,
             apCount = accessPointsMap.size,
             localizedCount = activeAPs.size,
+            hubsCount = hubsMap.size,
+            uncalibratedHubsCount = hubsMap.values.count { !it.isCalibrated },
             isCalibrated = calibrationState.isCalibrated,
             onOpenSettings = { showSettingsDialog = true },
             onOpenCalibration = { showCalibrationDialog = true },
+            onOpenHubs = { showHubsSheet = true },
             onOpenAPList = { showAPListSheet = true },
             onToggleDebug = { showDebugOverlay = !showDebugOverlay }
         )
@@ -437,6 +535,32 @@ fun MainARScreen(
             }
         }
 
+        // --- 4b. MOVEMENT GUIDANCE BANNER (Section 32) ---
+        if (activeAPs.isEmpty() && localScans.isNotEmpty()) {
+            Surface(
+                color = Color(0xCC111111),
+                shape = RoundedCornerShape(20.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.5f)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 90.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "🚶", fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Move around the room to collect spatial Wi-Fi measurements",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
         // --- 5. DEBUG OVERLAY ---
         if (showDebugOverlay) {
             DebugInfoOverlay(
@@ -444,7 +568,12 @@ fun MainARScreen(
                 camX = cameraPoseX,
                 camY = cameraPoseY,
                 camZ = cameraPoseZ,
+                qx = cameraQx,
+                qy = cameraQy,
+                qz = cameraQz,
+                qw = cameraQw,
                 serverPose = transformer.arToServer(cameraPoseX, cameraPoseY, cameraPoseZ),
+                selectedAP = selectedAP,
                 calibration = calibrationState,
                 connection = connectionStatus,
                 apCount = accessPointsMap.size,
@@ -497,6 +626,25 @@ fun MainARScreen(
                     showCalibrationDialog = false
                 },
                 onDismiss = { showCalibrationDialog = false }
+            )
+        }
+
+        if (showHubsSheet) {
+            VenueHubsBottomSheet(
+                hubs = hubsMap.values.toList(),
+                cameraX = cameraPoseX,
+                cameraY = cameraPoseY,
+                cameraZ = cameraPoseZ,
+                transformer = transformer,
+                onAnchorHub = { hubId, sX, sY, sZ ->
+                    webSocketManager.sendUpdateHubPosition(hubId, sX, sY, sZ)
+                    markerManager.recalculateArCoordinates()
+                },
+                onSelectHub = { hubId ->
+                    markerManager.selectHub(hubId)
+                    showHubsSheet = false
+                },
+                onDismiss = { showHubsSheet = false }
             )
         }
 
@@ -694,9 +842,12 @@ fun TopStatusBar(
     lastScanTimeMs: Long,
     apCount: Int,
     localizedCount: Int,
+    hubsCount: Int,
+    uncalibratedHubsCount: Int,
     isCalibrated: Boolean,
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
+    onOpenHubs: () -> Unit,
     onOpenAPList: () -> Unit,
     onToggleDebug: () -> Unit
 ) {
@@ -739,15 +890,26 @@ fun TopStatusBar(
                 )
             }
 
-            // AP Counts & Scan Age
+            // AP Counts & Hubs Count
             Text(
-                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount (${scanAgeSec}s)" else "No Wi-Fi scan",
+                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount | Hubs: $hubsCount (${scanAgeSec}s)" else "Hubs: $hubsCount",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.LightGray
             )
 
             // Buttons
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenHubs, modifier = Modifier.size(32.dp)) {
+                    BadgedBox(badge = {
+                        if (uncalibratedHubsCount > 0) {
+                            Badge(containerColor = Color(0xFFFF9800)) {
+                                Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
+                            }
+                        }
+                    }) {
+                        Text(text = "💻", fontSize = 18.sp)
+                    }
+                }
                 IconButton(onClick = onOpenCalibration, modifier = Modifier.size(32.dp)) {
                     Text(text = "🧭", fontSize = 18.sp)
                 }
@@ -856,7 +1018,7 @@ fun ApproachModeBanner(
 }
 
 // ==========================================
-// Debug Overlay
+// Debug Overlay (Section 41)
 // ==========================================
 
 @Composable
@@ -865,7 +1027,12 @@ fun DebugInfoOverlay(
     camX: Float,
     camY: Float,
     camZ: Float,
+    qx: Float,
+    qy: Float,
+    qz: Float,
+    qw: Float,
     serverPose: APPosition,
+    selectedAP: AccessPointUIState?,
     calibration: CalibrationState,
     connection: ConnectionStatus,
     apCount: Int,
@@ -873,30 +1040,70 @@ fun DebugInfoOverlay(
     scanCount: Int,
     modifier: Modifier = Modifier
 ) {
+    // Calculate Yaw, Pitch, Roll from quaternion
+    val sinr_cosp = 2f * (qw * qx + qy * qz)
+    val cosr_cosp = 1f - 2f * (qx * qx + qy * qy)
+    val roll = Math.toDegrees(atan2(sinr_cosp.toDouble(), cosr_cosp.toDouble())).toFloat()
+
+    val sinp = 2f * (qw * qy - qz * qx)
+    val pitch = if (abs(sinp) >= 1) Math.toDegrees(Math.copySign(Math.PI / 2, sinp.toDouble())).toFloat()
+                else Math.toDegrees(Math.asin(sinp.toDouble())).toFloat()
+
+    val siny_cosp = 2f * (qw * qz + qx * qy)
+    val cosy_cosp = 1f - 2f * (qy * qy + qz * qz)
+    val yaw = Math.toDegrees(atan2(siny_cosp.toDouble(), cosy_cosp.toDouble())).toFloat()
+
     Card(
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xDD000000)),
-        modifier = modifier.width(280.dp)
+        colors = CardDefaults.cardColors(containerColor = Color(0xEE000000)),
+        modifier = modifier.width(300.dp)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             Text(
-                text = "TELEMETRY DEBUG",
+                text = "TELEMETRY DEBUG (SPATIAL)",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
                 color = Color.Yellow
             )
             Spacer(modifier = Modifier.height(4.dp))
+            val debugText = buildString {
+                appendLine("TRACKING: $trackingState")
+                appendLine("PHONE AR POS: (%.2f, %.2f, %.2f)".format(camX, camY, camZ))
+                appendLine("PHONE ROTATION: Y:%.1f° P:%.1f° R:%.1f°".format(yaw, pitch, roll))
+                appendLine("PHONE SERVER POS: (%.2f, %.2f, %.2f)".format(serverPose.x, serverPose.y, serverPose.z))
+                appendLine("CALIBRATION: ${if (calibration.isCalibrated) "VALID" else "INVALID"}")
+                appendLine("SERVER WS: ${connection.name}")
+                appendLine("RAW SCANS: $scanCount | APs: $localizedCount/$apCount")
+                appendLine("------------------------------")
+                if (selectedAP != null) {
+                    appendLine("SELECTED AP: ${selectedAP.ssid}")
+                    val sPos = selectedAP.serverPosition
+                    if (sPos != null) {
+                        appendLine("AP SERVER POS: (%.2f, %.2f, %.2f)".format(sPos.x, sPos.y, sPos.z))
+                    } else {
+                        appendLine("AP SERVER POS: None")
+                    }
+                    if (selectedAP.arPositionX != null) {
+                        appendLine("AP AR POS: (%.2f, %.2f, %.2f)".format(selectedAP.arPositionX, selectedAP.arPositionY, selectedAP.arPositionZ))
+                    } else {
+                        appendLine("AP AR POS: None (Not localized)")
+                    }
+                    appendLine("DISTANCE: ${selectedAP.distanceToUserM?.let { "%.2f m".format(it) } ?: "-- m"}")
+                    appendLine("LOCAL RSSI: ${selectedAP.phoneRssiDbm?.let { "$it dBm" } ?: "Searching"}")
+                    appendLine("CONFIDENCE: ${(selectedAP.confidence * 100).toInt()}%")
+                    appendLine("ERROR: ±%.1f m".format(selectedAP.errorRadiusM))
+                    appendLine("OBSERVATIONS: ${selectedAP.observationCount} | HUBS: ${selectedAP.hubCount}")
+                } else {
+                    appendLine("SELECTED AP: None (Tap to inspect)")
+                }
+            }
             Text(
-                text = "ARCore: $trackingState\n" +
-                        "AR Pose: (%.2f, %.2f, %.2f)\n".format(camX, camY, camZ) +
-                        "Server Pose: (%.2f, %.2f, %.2f)\n".format(serverPose.x, serverPose.y, serverPose.z) +
-                        "Calibrated: ${calibration.isCalibrated} (Yaw: %.1f°)\n".format(calibration.rotationYawDegrees) +
-                        "Server WS: ${connection.name}\n" +
-                        "Raw Scans: $scanCount | APs: $localizedCount/$apCount",
+                text = debugText,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = Color(0xFF00FF66),
-                fontSize = 11.sp
+                fontSize = 10.5.sp,
+                lineHeight = 14.sp
             )
         }
     }
@@ -1130,6 +1337,12 @@ fun APListBottomSheet(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = Color(0xFF0288D1)
                                     )
+                                } else {
+                                    Text(
+                                        text = "Insufficient localization data (%d obs, %d hubs)".format(ap.observationCount, ap.hubCount),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.Gray
+                                    )
                                 }
                             }
 
@@ -1149,6 +1362,329 @@ fun APListBottomSheet(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// Hub Location Marker & AR Billboard
+// ==========================================
+
+@Composable
+fun HubLocationMarkerOverlay(
+    screenPoint: ScreenPoint,
+    hub: HubUIState,
+    onSelect: () -> Unit
+) {
+    val density = LocalDensity.current
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+    ) {
+        // --- Center Hub Pin Point (Purple glowing beacon) ---
+        Box(
+            modifier = Modifier
+                .size(16.dp)
+                .offset((-8).dp, (-8).dp)
+                .background(Color.White, CircleShape)
+                .border(3.dp, if (hub.isSelected) Color.Yellow else Color(0xFF9C27B0), CircleShape)
+        )
+
+        // --- Floating Billboard HUD Card ---
+        Card(
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (hub.isSelected) Color(0xDD3A1C5A) else Color(0xDD1E1035)
+            ),
+            border = if (hub.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x999C27B0)),
+            modifier = Modifier
+                .offset(x = (-80).dp, y = (-110).dp)
+                .width(170.dp)
+                .clickable { onSelect() }
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                // Hub Name / ID
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "💻",
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = hub.hubId,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Distance
+                Text(
+                    text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFCE93D8)
+                )
+
+                // Status & Observation Count
+                Text(
+                    text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
+                )
+            }
+        }
+    }
+}
+
+// ==========================================
+// Hub Off-Screen Directional Indicator
+// ==========================================
+
+@Composable
+fun HubOffScreenDirectionIndicator(
+    screenPoint: ScreenPoint,
+    hub: HubUIState,
+    onClick: () -> Unit
+) {
+    val x = screenPoint.screenX
+    val y = screenPoint.screenY
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .background(Color(0xDD9C27B0), RoundedCornerShape(16.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "➤",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "${hub.hubId} (${hub.distanceToUserM?.let { "%.1fm".format(it) } ?: "..."})",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+    }
+}
+
+// ==========================================
+// Venue Hubs Sheet (Auto-Discovery & 1-Tap Anchor)
+// ==========================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VenueHubsBottomSheet(
+    hubs: List<HubUIState>,
+    cameraX: Float,
+    cameraY: Float,
+    cameraZ: Float,
+    transformer: CoordinateTransformer,
+    onAnchorHub: (hubId: String, sX: Double, sY: Double, sZ: Double) -> Unit,
+    onSelectHub: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Venue Wi-Fi Hubs (${hubs.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "${hubs.count { it.isCalibrated }}/${hubs.size} Calibrated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (hubs.all { it.isCalibrated } && hubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (hubs.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "💻", fontSize = 36.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No active hubs detected",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Start python main.py on your venue laptops. They will appear here automatically via WebSocket.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxHeight(0.6f)) {
+                    items(hubs) { hub ->
+                        HubItemCard(
+                            hub = hub,
+                            onAnchorHere = {
+                                val sPose = transformer.arToServer(cameraX, cameraY, cameraZ)
+                                onAnchorHub(hub.hubId, sPose.x, sPose.y, sPose.z)
+                            },
+                            onSelect = { onSelectHub(hub.hubId) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HubItemCard(
+    hub: HubUIState,
+    onAnchorHere: () -> Unit,
+    onSelect: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (hub.isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "💻", fontSize = 18.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = hub.hubId,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${hub.platform.ifEmpty { "Venue Laptop" }} • ${hub.observationCount} scans received",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    color = if (hub.isCalibrated) Color(0x334CAF50) else Color(0x33FF9800),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (hub.isCalibrated) "Calibrated" else "Needs Calibration",
+                        color = if (hub.isCalibrated) Color(0xFF2E7D32) else Color(0xFFE65100),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (hub.isCalibrated) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Pos: (%.1f, %.1f, %.1f) m".format(hub.serverPositionX, hub.serverPositionY, hub.serverPositionZ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (hub.distanceToUserM != null) {
+                        Text(
+                            text = "~%.1f m away".format(hub.distanceToUserM),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7C4DFF)
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = "Default / unverified location. Bring phone near laptop to anchor accurately.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE65100)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (hub.isCalibrated) {
+                    OutlinedButton(
+                        onClick = onSelect,
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Highlight in AR")
+                    }
+                    Button(
+                        onClick = onAnchorHere,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("Re-Anchor Here")
+                    }
+                } else {
+                    Button(
+                        onClick = onAnchorHere,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("📍 Anchor Here (Phone Position)")
                     }
                 }
             }

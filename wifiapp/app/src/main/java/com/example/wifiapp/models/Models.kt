@@ -115,6 +115,63 @@ data class APUpdateMessage(
     val ap: APUpdatePayload
 )
 
+@Serializable
+data class HubPayload(
+    @SerialName("hub_id") val hubId: String,
+    @SerialName("device_type") val deviceType: String = "laptop",
+    val platform: String = "windows",
+    val version: String = "1.0.0",
+    val status: String = "online",
+    @SerialName("coordinate_system") val coordinateSystem: String? = null,
+    val position: APPosition? = null,
+    @SerialName("observation_count") val observationCount: Long = 0,
+    @SerialName("last_seen") val lastSeen: String? = null
+)
+
+@Serializable
+data class HubsSnapshotMessage(
+    val type: String = "hubs_snapshot",
+    val hubs: List<HubPayload> = emptyList()
+)
+
+@Serializable
+data class HubUpdateMessage(
+    val type: String = "hub_update",
+    val hub: HubPayload
+)
+
+@Serializable
+data class UpdateHubPositionMessage(
+    val type: String = "update_hub_position",
+    @SerialName("hub_id") val hubId: String,
+    @SerialName("coordinate_system") val coordinateSystem: String = "local",
+    val x: Double,
+    val y: Double,
+    val z: Double
+)
+
+data class HubUIState(
+    val hubId: String,
+    val deviceType: String = "laptop",
+    val platform: String = "windows",
+    val version: String = "1.0.0",
+    val status: String = "online",
+    val serverPosition: APPosition? = null,
+    val arPositionX: Float? = null,
+    val arPositionY: Float? = null,
+    val arPositionZ: Float? = null,
+    val distanceToUserM: Float? = null,
+    val observationCount: Long = 0,
+    val isCalibrated: Boolean = false,
+    val isSelected: Boolean = false,
+    val lastSeen: String? = null,
+    val lastUpdatedMs: Long = System.currentTimeMillis()
+) {
+    val serverPositionX: Double get() = serverPosition?.x ?: 0.0
+    val serverPositionY: Double get() = serverPosition?.y ?: 0.0
+    val serverPositionZ: Double get() = serverPosition?.z ?: 0.0
+}
+
 // --- Enums & UI State ---
 
 enum class ConnectionStatus {
@@ -176,7 +233,7 @@ data class AccessPointUIState(
         get() = arPositionX != null && arPositionY != null && arPositionZ != null
 
     val isLocalized: Boolean
-        get() = (status == APLocalizationStatus.LOCALIZED && serverPosition != null) || hasSpatialPosition
+        get() = (status == APLocalizationStatus.LOCALIZED || status == APLocalizationStatus.UNSTABLE) && serverPosition != null && hasSpatialPosition
 
     // Helper for RSSI trend ("Getting closer", "Getting farther", "Stable")
     val rssiTrend: String
@@ -204,3 +261,45 @@ data class CalibrationState(
     val rotationYawDegrees: Float = 0f,
     val calibratedAtMs: Long = 0L
 )
+
+data class TimestampedPose(
+    val timestampMs: Long,
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    val qx: Float,
+    val qy: Float,
+    val qz: Float,
+    val qw: Float,
+    val isTracking: Boolean
+)
+
+class PoseHistoryBuffer(private val maxDurationMs: Long = 10_000L) {
+    private val buffer = java.util.concurrent.ConcurrentLinkedDeque<TimestampedPose>()
+
+    fun addPose(pose: TimestampedPose) {
+        buffer.addLast(pose)
+        val cutoff = pose.timestampMs - maxDurationMs
+        while (buffer.isNotEmpty() && buffer.first.timestampMs < cutoff) {
+            buffer.pollFirst()
+        }
+    }
+
+    fun getClosestPose(timestampMs: Long, maxToleranceMs: Long = 4_000L): TimestampedPose? {
+        if (buffer.isEmpty()) return null
+        var closest: TimestampedPose? = null
+        var minDiff = Long.MAX_VALUE
+        for (pose in buffer) {
+            val diff = kotlin.math.abs(pose.timestampMs - timestampMs)
+            if (diff < minDiff) {
+                minDiff = diff
+                closest = pose
+            }
+        }
+        return if (minDiff <= maxToleranceMs) closest else null
+    }
+
+    fun clear() {
+        buffer.clear()
+    }
+}

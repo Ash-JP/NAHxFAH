@@ -86,8 +86,9 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	go client.WritePump()
 
-	// Send immediate snapshot of all known access points to the newly connected app
+	// Send immediate snapshot of all known access points and venue hubs
 	go h.sendInitialAPSnapshot(client)
+	go h.sendInitialHubsSnapshot(client)
 
 	// Read loop: auto-multiplex any incoming messages from the app
 	for {
@@ -146,6 +147,51 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				slog.Debug("mobile pose received on /ws", "id", id, "x", msg.Position.X, "y", msg.Position.Y, "z", msg.Position.Z)
 			}
 
+		case protocol.MsgUpdateHubPosition:
+			var updateMsg protocol.UpdateHubPositionMessage
+			if err := json.Unmarshal(rawMsg, &updateMsg); err == nil {
+				cs := updateMsg.CoordinateSystem
+				if cs == "" {
+					cs = "local"
+				}
+				slog.Info("hub position updated from mobile AR",
+					"hub_id", updateMsg.HubID,
+					"x", updateMsg.X,
+					"y", updateMsg.Y,
+					"z", updateMsg.Z,
+				)
+				_ = h.hubManager.UpdatePosition(context.Background(), updateMsg.HubID, updateMsg.X, updateMsg.Y, updateMsg.Z, cs)
+
+				// 1. Notify the hub agent so it updates its config and saves to config.json
+				hubPosMsg := protocol.HubPositionUpdateMessage{
+					Type:  protocol.MsgHubPositionUpdate,
+					HubID: updateMsg.HubID,
+					Position: protocol.HubPositionPayload{
+						CoordinateSystem: cs,
+						X:                updateMsg.X,
+						Y:                updateMsg.Y,
+						Z:                updateMsg.Z,
+					},
+				}
+				h.manager.SendToHub(updateMsg.HubID, hubPosMsg)
+
+				// 2. Broadcast updated hub state to all mobile and dashboard clients
+				hubUpdateMsg := protocol.HubUpdateMessage{
+					Type: protocol.MsgHubUpdate,
+					Hub: protocol.HubPayload{
+						HubID:            updateMsg.HubID,
+						Status:           "online",
+						CoordinateSystem: cs,
+						Position: &protocol.APPosition{
+							X: updateMsg.X,
+							Y: updateMsg.Y,
+							Z: updateMsg.Z,
+						},
+					},
+				}
+				h.manager.BroadcastToAll(hubUpdateMsg)
+			}
+
 		case protocol.MsgMobileWiFiObservations:
 			var mobObs protocol.MobileWiFiObservationsMessage
 			if err := json.Unmarshal(rawMsg, &mobObs); err == nil {
@@ -190,6 +236,28 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				sendJSON(client, ack)
 				slog.Info("hub registered on /ws", "hub_id", regMsg.HubID)
+
+				// Broadcast newly registered hub to mobile clients
+				var pos *protocol.APPosition
+				if regMsg.Position != nil && (regMsg.Position.X != 0 || regMsg.Position.Y != 0 || regMsg.Position.Z != 0) {
+					pos = &protocol.APPosition{
+						X: regMsg.Position.X,
+						Y: regMsg.Position.Y,
+						Z: regMsg.Position.Z,
+					}
+				}
+				h.manager.BroadcastToMobile(protocol.HubUpdateMessage{
+					Type: protocol.MsgHubUpdate,
+					Hub: protocol.HubPayload{
+						HubID:            regMsg.HubID,
+						DeviceType:       regMsg.DeviceType,
+						Platform:         regMsg.Platform,
+						Version:          regMsg.Version,
+						Status:           "online",
+						CoordinateSystem: "local",
+						Position:         pos,
+					},
+				})
 			}
 
 		case protocol.MsgWiFiObservations:
@@ -277,4 +345,38 @@ func (h *UniversalHandler) sendInitialAPSnapshot(client *Client) {
 		}
 		sendJSON(client, msg)
 	}
+}
+
+// sendInitialHubsSnapshot pushes all active venue hubs to the client upon connect.
+func (h *UniversalHandler) sendInitialHubsSnapshot(client *Client) {
+	states := h.hubManager.ListStates()
+	payloads := make([]protocol.HubPayload, 0, len(states))
+	for _, s := range states {
+		if s.Hub == nil {
+			continue
+		}
+		var pos *protocol.APPosition
+		if s.Hub.X != nil && s.Hub.Y != nil && s.Hub.Z != nil {
+			pos = &protocol.APPosition{
+				X: *s.Hub.X,
+				Y: *s.Hub.Y,
+				Z: *s.Hub.Z,
+			}
+		}
+		payloads = append(payloads, protocol.HubPayload{
+			HubID:            s.Hub.HubID,
+			DeviceType:       s.Hub.DeviceType,
+			Platform:         s.Hub.Platform,
+			Version:          s.Hub.Version,
+			Status:           string(s.Status),
+			CoordinateSystem: s.Hub.CoordinateSystem,
+			Position:         pos,
+			ObservationCount: s.ObservationCount,
+			LastSeen:         &s.LastSeen,
+		})
+	}
+	sendJSON(client, protocol.HubsSnapshotMessage{
+		Type: protocol.MsgHubsSnapshot,
+		Hubs: payloads,
+	})
 }
