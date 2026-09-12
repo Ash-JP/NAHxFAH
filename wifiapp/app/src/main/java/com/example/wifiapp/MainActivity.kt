@@ -340,8 +340,9 @@ fun MainARScreen(
                         camera.getProjectionMatrix(pm, 0, 0.1f, 100.0f)
                         projMatrix = pm
 
-                        // Auto-anchor AR world origin on first tracking frame if not yet calibrated
-                        if (!calibrationState.isCalibrated) {
+                        // Auto-anchor AR world origin on first tracking frame ONLY IF no venue hubs exist
+                        val hasVenueHubs = hubsMap.values.any { it.isCalibrated && !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
+                        if (!calibrationState.isCalibrated && !hasVenueHubs) {
                             calibrationManager.setAnchorCalibration(
                                 anchorId = "ORIGIN",
                                 serverX = 0.0,
@@ -407,7 +408,7 @@ fun MainARScreen(
         val selectedAP = accessPointsMap[selectedBssid]
 
         val calibratedHubs = hubsMap.values
-            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null }
+            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null && !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
         val selectedHub = hubsMap[selectedHubId]
 
         // Safely manage 3D glowing spheres without memory leaks or render collisions
@@ -499,8 +500,21 @@ fun MainARScreen(
             }
         }
 
+        // Depth-sort active APs: further items rendered first, closer items rendered last (on top)
+        // Selected AP is rendered absolute last so its full card is always in front
+        val sortedAPs = activeAPs.sortedWith(
+            compareBy<AccessPointUIState> { it.bssid == selectedBssid }
+                .thenByDescending { it.distanceToUserM ?: 99f }
+        )
+
+        // Depth-sort calibrated hubs
+        val sortedHubs = calibratedHubs.sortedWith(
+            compareBy<HubUIState> { it.hubId == selectedHubId }
+                .thenByDescending { it.distanceToUserM ?: 99f }
+        )
+
         // 2D overlays for Access Points
-        for (ap in activeAPs) {
+        for (ap in sortedAPs) {
             val arX = ap.arPositionX ?: continue
             val arY = ap.arPositionY ?: continue
             val arZ = ap.arPositionZ ?: continue
@@ -519,7 +533,7 @@ fun MainARScreen(
                 APLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     ap = ap,
-                    onSelect = { markerManager.selectAP(ap.bssid) }
+                    onSelect = { markerManager.selectAP(if (ap.isSelected) null else ap.bssid) }
                 )
             } else if (ap.bssid == selectedBssid) {
                 OffScreenDirectionIndicator(
@@ -531,7 +545,7 @@ fun MainARScreen(
         }
 
         // 2D overlays for Venue Hubs
-        for (hub in calibratedHubs) {
+        for (hub in sortedHubs) {
             val arX = hub.arPositionX ?: continue
             val arY = hub.arPositionY ?: continue
             val arZ = hub.arPositionZ ?: continue
@@ -550,7 +564,7 @@ fun MainARScreen(
                 HubLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     hub = hub,
-                    onSelect = { markerManager.selectHub(hub.hubId) }
+                    onSelect = { markerManager.selectHub(if (hub.isSelected) null else hub.hubId) }
                 )
             } else if (hub.hubId == selectedHubId) {
                 HubOffScreenDirectionIndicator(
@@ -562,16 +576,24 @@ fun MainARScreen(
         }
 
         // --- 3. TOP STATUS HUD ---
+        val stationaryHubs = hubsMap.values.filter { !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
         TopStatusBar(
             connectionStatus = connectionStatus,
             lastScanTimeMs = lastScanTime,
             apCount = accessPointsMap.size,
             localizedCount = activeAPs.size,
-            hubsCount = hubsMap.size,
-            uncalibratedHubsCount = hubsMap.values.count { !it.isCalibrated },
+            hubsCount = stationaryHubs.size,
+            uncalibratedHubsCount = stationaryHubs.count { !it.isCalibrated },
             isCalibrated = calibrationState.isCalibrated,
+            anchorId = calibrationState.anchorId,
             onOpenSettings = { showSettingsDialog = true },
-            onOpenCalibration = { showCalibrationDialog = true },
+            onOpenCalibration = {
+                if (stationaryHubs.isNotEmpty()) {
+                    showHubsSheet = true
+                } else {
+                    showCalibrationDialog = true
+                }
+            },
             onOpenHubs = { showHubsSheet = true },
             onOpenAPList = { showAPListSheet = true },
             onToggleDebug = { showDebugOverlay = !showDebugOverlay }
@@ -775,104 +797,161 @@ fun APLocationMarkerOverlay(
         modifier = Modifier
             .offset { IntOffset(sx, sy) }
     ) {
-        // --- Uncertainty Circle / Predicted Location Area ---
-        Box(
-            modifier = Modifier
-                .size(errorDpRadius * 2)
-                .offset(-errorDpRadius, -errorDpRadius)
-                .background(
-                    color = when {
-                        ap.confidence >= 0.75 -> Color(0x334CAF50)
-                        ap.confidence >= 0.45 -> Color(0x33FF9800)
-                        else -> Color(0x33F44336)
-                    },
-                    shape = CircleShape
-                )
-                .border(
-                    width = 2.dp,
-                    color = when {
+        if (ap.isSelected) {
+            // --- Uncertainty Circle / Predicted Location Area (Only for selected AP) ---
+            Box(
+                modifier = Modifier
+                    .size(errorDpRadius * 2)
+                    .offset(-errorDpRadius, -errorDpRadius)
+                    .background(
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0x334CAF50)
+                            ap.confidence >= 0.45 -> Color(0x33FF9800)
+                            else -> Color(0x33F44336)
+                        },
+                        shape = CircleShape
+                    )
+                    .border(
+                        width = 2.dp,
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0x994CAF50)
+                            ap.confidence >= 0.45 -> Color(0x99FF9800)
+                            else -> Color(0x99F44336)
+                        },
+                        shape = CircleShape
+                    )
+            )
+
+            // --- Center AP Pin Point (Selected) ---
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .offset((-8).dp, (-8).dp)
+                    .background(Color.White, CircleShape)
+                    .border(3.dp, Color.Yellow, CircleShape)
+            )
+
+            // --- Floating Billboard HUD Card ---
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xEE002244)
+                ),
+                border = borderCardStroke(Color.Yellow),
+                modifier = Modifier
+                    .offset(x = (-80).dp, y = (-130).dp)
+                    .width(175.dp)
+                    .clickable { onSelect() }
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    // SSID
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "📶",
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = ap.ssid.ifEmpty { "<Hidden SSID>" },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(3.dp))
+
+                    // Real Phone RSSI
+                    val phoneRssi = ap.phoneRssiDbm
+                    Text(
+                        text = if (phoneRssi != null) "● $phoneRssi dBm (phone)" else "● No local signal",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (phoneRssi != null && phoneRssi > -65) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    // Distance
+                    Text(
+                        text = ap.distanceToUserM?.let { "~%.1f m away".format(it) } ?: "Estimating distance...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.LightGray
+                    )
+
+                    // Confidence & Accuracy
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Conf: ${(ap.confidence * 100).roundToInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF81D4FA)
+                        )
+                        Text(
+                            text = "±%.1fm".format(ap.errorRadiusM),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFB0BEC5)
+                        )
+                    }
+                }
+            }
+        } else {
+            // --- Unselected: Sleek, compact, non-intrusive AR badge ---
+            // Center Pin
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .offset((-6).dp, (-6).dp)
+                    .background(
+                        color = when {
+                            ap.confidence >= 0.75 -> Color(0xFF4CAF50)
+                            ap.confidence >= 0.45 -> Color(0xFFFF9800)
+                            else -> Color(0xFFF44336)
+                        },
+                        shape = CircleShape
+                    )
+                    .border(2.dp, Color.White, CircleShape)
+            )
+
+            // Sleek mini pill badge
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xDD111827),
+                border = borderCardStroke(
+                    when {
                         ap.confidence >= 0.75 -> Color(0x994CAF50)
                         ap.confidence >= 0.45 -> Color(0x99FF9800)
                         else -> Color(0x99F44336)
-                    },
-                    shape = CircleShape
-                )
-        )
-
-        // --- Center AP Pin Point ---
-        Box(
-            modifier = Modifier
-                .size(14.dp)
-                .offset((-7).dp, (-7).dp)
-                .background(Color.White, CircleShape)
-                .border(3.dp, if (ap.isSelected) Color.Yellow else Color(0xFF00E5FF), CircleShape)
-        )
-
-        // --- Floating Billboard HUD Card ---
-        Card(
-            shape = RoundedCornerShape(10.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (ap.isSelected) Color(0xDD002244) else Color(0xDD111827)
-            ),
-            border = if (ap.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x55FFFFFF)),
-            modifier = Modifier
-                .offset(x = (-80).dp, y = (-125).dp)
-                .width(170.dp)
-                .clickable { onSelect() }
-        ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // SSID
+                    }
+                ),
+                modifier = Modifier
+                    .offset(x = 8.dp, y = (-12).dp)
+                    .clickable { onSelect() }
+            ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                 ) {
+                    Text(text = "📶", fontSize = 10.sp)
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
-                        text = "📶",
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = ap.ssid,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                // Real Phone RSSI
-                val phoneRssi = ap.phoneRssiDbm
-                Text(
-                    text = if (phoneRssi != null) "● $phoneRssi dBm (phone)" else "● No local signal",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (phoneRssi != null && phoneRssi > -65) Color(0xFF4CAF50) else Color(0xFFFFB74D),
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                // Distance
-                Text(
-                    text = ap.distanceToUserM?.let { "~%.1f m away".format(it) } ?: "Estimating distance...",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.LightGray
-                )
-
-                // Confidence & Accuracy
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Conf: ${(ap.confidence * 100).roundToInt()}%",
+                        text = ap.ssid.ifEmpty { "AP" }.take(12),
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF81D4FA)
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
                     )
-                    Text(
-                        text = "±%.1fm".format(ap.errorRadiusM),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFB0BEC5)
-                    )
+                    ap.distanceToUserM?.let { d ->
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "• %.1fm".format(d),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF81D4FA)
+                        )
+                    }
                 }
             }
         }
@@ -935,6 +1014,7 @@ fun TopStatusBar(
     hubsCount: Int,
     uncalibratedHubsCount: Int,
     isCalibrated: Boolean,
+    anchorId: String? = null,
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
     onOpenHubs: () -> Unit,
@@ -1032,7 +1112,11 @@ fun TopStatusBar(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = if (isCalibrated) "🧭 Origin Anchored" else "🧭 Calibrate Origin",
+                            text = when {
+                                !isCalibrated -> "📍 Tap to Align AR"
+                                anchorId != null && anchorId != "ORIGIN" -> "📍 Aligned: $anchorId"
+                                else -> "🧭 Origin Anchored"
+                            },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = if (isCalibrated) Color(0xFF00E5FF) else Color(0xFFFFB74D)
@@ -1563,63 +1647,105 @@ fun HubLocationMarkerOverlay(
         modifier = Modifier
             .offset { IntOffset(sx, sy) }
     ) {
-        // --- Center Hub Pin Point (Purple glowing beacon) ---
-        Box(
-            modifier = Modifier
-                .size(16.dp)
-                .offset((-8).dp, (-8).dp)
-                .background(Color.White, CircleShape)
-                .border(3.dp, if (hub.isSelected) Color.Yellow else Color(0xFF9C27B0), CircleShape)
-        )
+        if (hub.isSelected) {
+            // --- Center Hub Pin Point (Selected) ---
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .offset((-8).dp, (-8).dp)
+                    .background(Color.White, CircleShape)
+                    .border(3.dp, Color.Yellow, CircleShape)
+            )
 
-        // --- Floating Billboard HUD Card ---
-        Card(
-            shape = RoundedCornerShape(10.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (hub.isSelected) Color(0xDD3A1C5A) else Color(0xDD1E1035)
-            ),
-            border = if (hub.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x999C27B0)),
-            modifier = Modifier
-                .offset(x = (-80).dp, y = (-110).dp)
-                .width(170.dp)
-                .clickable { onSelect() }
-        ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // Hub Name / ID
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            // --- Floating Billboard HUD Card ---
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xEE3A1C5A)
+                ),
+                border = borderCardStroke(Color.Yellow),
+                modifier = Modifier
+                    .offset(x = (-80).dp, y = (-120).dp)
+                    .width(170.dp)
+                    .clickable { onSelect() }
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    // Hub Name / ID
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "💻",
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = hub.hubId,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Distance
                     Text(
-                        text = "💻",
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = hub.hubId,
-                        style = MaterialTheme.typography.titleSmall,
+                        text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1
+                        color = Color(0xFFCE93D8)
+                    )
+
+                    // Status & Observation Count
+                    Text(
+                        text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
                     )
                 }
+            }
+        } else {
+            // --- Unselected: Sleek, compact purple badge ---
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .offset((-6).dp, (-6).dp)
+                    .background(Color(0xFF9C27B0), CircleShape)
+                    .border(2.dp, Color.White, CircleShape)
+            )
 
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Distance
-                Text(
-                    text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFCE93D8)
-                )
-
-                // Status & Observation Count
-                Text(
-                    text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
-                )
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xDD1E1035),
+                border = borderCardStroke(Color(0x999C27B0)),
+                modifier = Modifier
+                    .offset(x = 8.dp, y = (-12).dp)
+                    .clickable { onSelect() }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text(text = "💻", fontSize = 10.sp)
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = hub.hubId,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    hub.distanceToUserM?.let { d ->
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "• %.1fm".format(d),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFCE93D8)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1683,6 +1809,10 @@ fun VenueHubsBottomSheet(
     onSelectHub: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val stationaryHubs = remember(hubs) {
+        hubs.filter { !it.hubId.startsWith("MOBILE-") && it.deviceType != "android" }
+    }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -1695,14 +1825,14 @@ fun VenueHubsBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Venue Wi-Fi Hubs (${hubs.size})",
+                    text = "Venue Wi-Fi Hubs (${stationaryHubs.size})",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "${hubs.count { it.isCalibrated }}/${hubs.size} Calibrated",
+                    text = "${stationaryHubs.count { it.isCalibrated }}/${stationaryHubs.size} Calibrated",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (hubs.all { it.isCalibrated } && hubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
+                    color = if (stationaryHubs.all { it.isCalibrated } && stationaryHubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
                     fontWeight = FontWeight.SemiBold
                 )
             }
@@ -1710,14 +1840,14 @@ fun VenueHubsBottomSheet(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location.",
+                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location, or tap '📍 Align AR' to synchronize the room's coordinate system with that laptop.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            if (hubs.isEmpty()) {
+            if (stationaryHubs.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1743,7 +1873,7 @@ fun VenueHubsBottomSheet(
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxHeight(0.6f)) {
-                    items(hubs) { hub ->
+                    items(stationaryHubs) { hub ->
                         HubItemCard(
                             hub = hub,
                             onAnchorHere = {

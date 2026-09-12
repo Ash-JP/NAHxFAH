@@ -93,11 +93,11 @@ func (s *ObservationService) ProcessObservations(ctx context.Context, msg *proto
 	// Step 2: Determine observation position
 	var hubX, hubY, hubZ float64
 	if strings.HasPrefix(msg.HubID, "MOBILE-") {
-		// Roving mobile phone: position updates on each movement
+		// Roving mobile phone: use current pose directly for observation cache
 		hubX = msg.Position.X
 		hubY = msg.Position.Y
 		hubZ = msg.Position.Z
-		_ = s.hubManager.UpdatePosition(ctx, msg.HubID, hubX, hubY, hubZ, msg.Position.CoordinateSystem)
+		// Note: Do NOT add mobile phones to hubManager, as they are not stationary venue hubs
 	} else {
 		// Stationary venue hub: prioritize calibrated position from hubManager
 		var hasPos bool
@@ -110,8 +110,8 @@ func (s *ObservationService) ProcessObservations(ctx context.Context, msg *proto
 				_ = s.hubManager.UpdatePosition(ctx, msg.HubID, hubX, hubY, hubZ, msg.Position.CoordinateSystem)
 			}
 		}
+		s.hubManager.IncrementObservations(msg.HubID, len(msg.Observations))
 	}
-	s.hubManager.IncrementObservations(msg.HubID, len(msg.Observations))
 
 	// Step 3: Deduplicate observations by BSSID within this scan
 	seen := make(map[string]bool)

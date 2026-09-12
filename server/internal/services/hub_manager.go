@@ -4,6 +4,7 @@ package services
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,11 @@ func NewHubManager(
 
 // Register creates or updates the hub record and marks it online.
 func (hm *HubManager) Register(ctx context.Context, hub *models.Hub) error {
+	// Mobile devices must not be registered as stationary venue hubs
+	if strings.HasPrefix(hub.HubID, "MOBILE-") || hub.DeviceType == "android" {
+		return nil
+	}
+
 	now := time.Now()
 	hub.Status = models.HubStatusOnline
 	hub.LastSeen = &now
@@ -99,6 +105,11 @@ func (hm *HubManager) Heartbeat(ctx context.Context, hubID string) {
 
 // UpdatePosition stores the hub's physical position.
 func (hm *HubManager) UpdatePosition(ctx context.Context, hubID string, x, y, z float64, cs string) error {
+	// Mobile devices are roving clients, not stationary venue hubs
+	if strings.HasPrefix(hubID, "MOBILE-") {
+		return nil
+	}
+
 	if err := hm.hubRepo.UpdatePosition(ctx, hubID, x, y, z, cs); err != nil {
 		return err
 	}

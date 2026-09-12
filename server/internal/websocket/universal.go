@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -122,13 +123,8 @@ func (h *UniversalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if version == "" {
 					version = msg.Version
 				}
-				h.hubManager.Register(context.Background(), &models.Hub{
-					HubID:      id,
-					DeviceType: msg.DeviceType,
-					Platform:   msg.Platform,
-					Version:    version,
-					Status:     models.HubStatusOnline,
-				})
+				// Mobile devices are client observers and AR viewers, NOT stationary venue hubs.
+				// Do not register mobile devices into hubManager as venue hubs.
 				ack := map[string]interface{}{
 					"type":        "mobile_registered",
 					"device_id":   id,
@@ -397,6 +393,10 @@ func (h *UniversalHandler) sendInitialHubsSnapshot(client *Client) {
 	payloads := make([]protocol.HubPayload, 0, len(states))
 	for _, s := range states {
 		if s.Hub == nil {
+			continue
+		}
+		// Never send mobile devices as stationary venue hubs
+		if s.Hub.DeviceType == "android" || strings.HasPrefix(s.Hub.HubID, "MOBILE-") {
 			continue
 		}
 		var pos *protocol.APPosition
