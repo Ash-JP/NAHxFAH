@@ -301,8 +301,8 @@ class BSSEntry:
     link_quality: int       # 0-100 from Windows
     frequency_mhz: Optional[int]  # channel center frequency in MHz
     channel: Optional[int]  # derived channel number, or None
-    interface: str          # interface description
-    timestamp: str          # ISO 8601 scan timestamp
+    interface: str = "Wi-Fi"  # interface description
+    timestamp: str = ""      # ISO 8601 scan timestamp
 
 
 def _frequency_to_channel(freq_mhz: Optional[int]) -> Optional[int]:
@@ -506,7 +506,7 @@ class WindowsWiFiScanner:
 
         if err != ERROR_SUCCESS:
             logger.warning("WlanGetNetworkBssList failed with error %d, using netsh fallback", err)
-            return self._scan_fallback_netsh()
+            return self._scan_fallback_netsh(interface_name=target.description if target else None)
 
         results: list[BSSEntry] = []
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -517,7 +517,7 @@ class WindowsWiFiScanner:
 
             if count == 0:
                 logger.info("WlanGetNetworkBssList returned 0 items, using netsh fallback")
-                return self._scan_fallback_netsh()
+                return self._scan_fallback_netsh(interface_name=target.description if target else None)
 
             # WLAN_BSS_LIST returns a contiguous array of dwNumberOfItems WLAN_BSS_ENTRY structs.
             # (The IE blob referenced by ulIeOffset is located at the tail of the buffer).
@@ -558,7 +558,7 @@ class WindowsWiFiScanner:
 
         return results
 
-    def _scan_fallback_netsh(self) -> list[BSSEntry]:
+    def _scan_fallback_netsh(self, interface_name: Optional[str] = None) -> list[BSSEntry]:
         """Fallback Wi-Fi scanner using Windows netsh command when native API fails."""
         try:
             out = subprocess.check_output(
@@ -573,6 +573,10 @@ class WindowsWiFiScanner:
 
         results: list[BSSEntry] = []
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        iface_desc = interface_name
+        if not iface_desc:
+            active = self._get_active_interface()
+            iface_desc = active.description if active else "Wi-Fi"
 
         current_ssid = "<hidden>"
         current_bssid = None
@@ -598,6 +602,7 @@ class WindowsWiFiScanner:
                         link_quality=current_signal_pct,
                         frequency_mhz=freq_mhz if current_channel > 0 else None,
                         channel=current_channel if current_channel > 0 else None,
+                        interface=iface_desc,
                         timestamp=now
                     ))
                 current_bssid = bssid_m.group(1)
@@ -625,6 +630,7 @@ class WindowsWiFiScanner:
                 link_quality=current_signal_pct,
                 frequency_mhz=freq_mhz if current_channel > 0 else None,
                 channel=current_channel if current_channel > 0 else None,
+                interface=iface_desc,
                 timestamp=now
             ))
 
