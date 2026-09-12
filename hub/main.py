@@ -167,7 +167,7 @@ def cmd_test_server() -> None:
         import websockets.exceptions
 
         try:
-            async with asyncio.timeout(10):
+            async def _connect_and_test() -> None:
                 async with websockets.connect(cfg.server_url) as ws:
                     pos = cfg.position
                     msg = {
@@ -204,6 +204,8 @@ def cmd_test_server() -> None:
                     else:
                         print(f"UNEXPECTED: Server returned {resp.get('type')}")
                         return
+
+            await asyncio.wait_for(_connect_and_test(), timeout=10)
 
         except asyncio.TimeoutError:
             print("FAILED: Connection timed out")

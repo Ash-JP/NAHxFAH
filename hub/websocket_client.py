@@ -167,19 +167,18 @@ class HubWebSocketClient:
     async def _wait_for_registration(self, ws) -> bool:
         """Wait for hub_registered acknowledgement from server."""
         try:
-            async with asyncio.timeout(15):
-                raw = await ws.recv()
-                msg = json.loads(raw)
-                if msg.get("type") == "hub_registered":
-                    logger.info("Server acknowledged registration: %s", msg.get("status"))
-                    return True
-                elif msg.get("type") == "error":
-                    logger.error("Registration rejected: %s — %s",
-                                 msg.get("code"), msg.get("message"))
-                    return False
-                else:
-                    logger.warning("Unexpected first message: %s", msg.get("type"))
-                    return False
+            raw = await asyncio.wait_for(ws.recv(), timeout=15)
+            msg = json.loads(raw)
+            if msg.get("type") == "hub_registered":
+                logger.info("Server acknowledged registration: %s", msg.get("status"))
+                return True
+            elif msg.get("type") == "error":
+                logger.error("Registration rejected: %s — %s",
+                             msg.get("code"), msg.get("message"))
+                return False
+            else:
+                logger.warning("Unexpected first message: %s", msg.get("type"))
+                return False
         except asyncio.TimeoutError:
             logger.error("Timed out waiting for hub_registered")
             return False
