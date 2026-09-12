@@ -581,7 +581,8 @@ fun MainARScreen(
                 scanCount = localScans.size,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 80.dp, start = 16.dp)
+                    .statusBarsPadding()
+                    .padding(top = 120.dp, start = 14.dp)
             )
         }
 
@@ -855,72 +856,157 @@ fun TopStatusBar(
 
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xCC000000)),
+        colors = CardDefaults.cardColors(containerColor = Color(0xEE111827)),
+        border = borderCardStroke(Color(0x44FFFFFF)),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .statusBarsPadding()
+            .padding(top = 10.dp, start = 12.dp, end = 12.dp, bottom = 4.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
-            // Server connection badge
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .background(
-                            color = when (connectionStatus) {
-                                ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
-                                ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0xFFFF9800)
-                                else -> Color(0xFFF44336)
-                            },
-                            shape = CircleShape
+            // Row 1: Connection status badge & Telemetry (APs / Hubs / Scan age)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Connection badge
+                Surface(
+                    color = when (connectionStatus) {
+                        ConnectionStatus.CONNECTED -> Color(0x334CAF50)
+                        ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0x33FF9800)
+                        else -> Color(0x33F44336)
+                    },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    color = when (connectionStatus) {
+                                        ConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
+                                        ConnectionStatus.CONNECTING, ConnectionStatus.RECONNECTING -> Color(0xFFFF9800)
+                                        else -> Color(0xFFF44336)
+                                    },
+                                    shape = CircleShape
+                                )
                         )
-                )
-                Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = when (connectionStatus) {
+                                ConnectionStatus.CONNECTED -> "ONLINE"
+                                ConnectionStatus.CONNECTING -> "CONNECTING"
+                                ConnectionStatus.RECONNECTING -> "RETRYING"
+                                else -> "OFFLINE"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                // AP Counts & Hubs Count
                 Text(
-                    text = connectionStatus.name,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount • $hubsCount Hubs (${scanAgeSec}s)" else "$hubsCount Hubs Active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE0E0E0),
+                    fontWeight = FontWeight.Medium
                 )
             }
 
-            // AP Counts & Hubs Count
-            Text(
-                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount | Hubs: $hubsCount (${scanAgeSec}s)" else "Hubs: $hubsCount",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.LightGray
-            )
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Buttons
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onOpenHubs, modifier = Modifier.size(32.dp)) {
-                    BadgedBox(badge = {
-                        if (uncalibratedHubsCount > 0) {
-                            Badge(containerColor = Color(0xFFFF9800)) {
-                                Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
-                            }
-                        }
-                    }) {
-                        Text(text = "💻", fontSize = 18.sp)
+            // Row 2: Quick Calibration Pill & Action Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Calibration Status Pill (Clickable)
+                Surface(
+                    color = if (isCalibrated) Color(0x3300E5FF) else Color(0x33FF9800),
+                    shape = RoundedCornerShape(8.dp),
+                    border = borderCardStroke(if (isCalibrated) Color(0x8800E5FF) else Color(0x88FF9800)),
+                    modifier = Modifier.clickable { onOpenCalibration() }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            text = if (isCalibrated) "🧭 Origin Anchored" else "🧭 Calibrate Origin",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isCalibrated) Color(0xFF00E5FF) else Color(0xFFFFB74D)
+                        )
                     }
                 }
-                IconButton(onClick = onOpenCalibration, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🧭", fontSize = 18.sp)
-                }
-                IconButton(onClick = onOpenAPList, modifier = Modifier.size(32.dp)) {
-                    Text(text = "📋", fontSize = 18.sp)
-                }
-                IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
-                    Text(text = "⚙️", fontSize = 18.sp)
-                }
-                IconButton(onClick = onToggleDebug, modifier = Modifier.size(32.dp)) {
-                    Text(text = "🐞", fontSize = 18.sp)
+
+                // Action Buttons
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Hubs Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x337C4DFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenHubs() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        BadgedBox(badge = {
+                            if (uncalibratedHubsCount > 0) {
+                                Badge(containerColor = Color(0xFFFF9800)) {
+                                    Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
+                                }
+                            }
+                        }) {
+                            Text(text = "💻", fontSize = 16.sp)
+                        }
+                    }
+
+                    // AP List Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenAPList() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "📋", fontSize = 16.sp)
+                    }
+
+                    // Settings Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onOpenSettings() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "⚙️", fontSize = 16.sp)
+                    }
+
+                    // Debug Button
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
+                            .clickable { onToggleDebug() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "🐞", fontSize = 16.sp)
+                    }
                 }
             }
         }
