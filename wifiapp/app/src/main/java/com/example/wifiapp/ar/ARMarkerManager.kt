@@ -1,9 +1,6 @@
 package com.example.wifiapp.ar
 
-import com.example.wifiapp.models.APLocalizationStatus
-import com.example.wifiapp.models.APUpdatePayload
-import com.example.wifiapp.models.AccessPointUIState
-import com.example.wifiapp.models.LocalWifiScan
+import com.example.wifiapp.models.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,7 +26,50 @@ class ARMarkerManager(
     private val _selectedBssid = MutableStateFlow<String?>(null)
     val selectedBssid: StateFlow<String?> = _selectedBssid.asStateFlow()
 
+    private val _hubs = MutableStateFlow<Map<String, HubUIState>>(emptyMap())
+    val hubs: StateFlow<Map<String, HubUIState>> = _hubs.asStateFlow()
+
+    private val _selectedHubId = MutableStateFlow<String?>(null)
+    val selectedHubId: StateFlow<String?> = _selectedHubId.asStateFlow()
+
     private val scope = CoroutineScope(Dispatchers.Default)
+
+    fun updateHubs(newHubs: Map<String, HubUIState>) {
+        val current = _hubs.value.toMutableMap()
+        for ((id, hub) in newHubs) {
+            val existing = current[id]
+            val serverPos = hub.serverPosition
+            var arX: Float? = null
+            var arY: Float? = null
+            var arZ: Float? = null
+            if (serverPos != null && (serverPos.x != 0.0 || serverPos.y != 0.0 || serverPos.z != 0.0)) {
+                val targetAr = transformer.serverToAr(serverPos)
+                arX = targetAr.first
+                arY = targetAr.second
+                arZ = targetAr.third
+            } else if (existing?.arPositionX != null) {
+                arX = existing.arPositionX
+                arY = existing.arPositionY
+                arZ = existing.arPositionZ
+            }
+            current[id] = hub.copy(
+                arPositionX = arX,
+                arPositionY = arY,
+                arPositionZ = arZ,
+                isCalibrated = arX != null && arY != null && arZ != null
+            )
+        }
+        _hubs.value = current
+    }
+
+    fun selectHub(hubId: String?) {
+        _selectedHubId.value = hubId
+        val current = _hubs.value.toMutableMap()
+        for ((k, h) in current) {
+            current[k] = h.copy(isSelected = (k == hubId))
+        }
+        _hubs.value = current
+    }
 
     fun onAPUpdateReceived(update: APUpdatePayload) {
         scope.launch {
@@ -138,37 +178,67 @@ class ARMarkerManager(
     }
 
     fun updateCameraDistances(camX: Float, camY: Float, camZ: Float) {
-        val current = _accessPoints.value
-        if (current.isEmpty()) return
-
-        val updated = current.mapValues { (_, ap) ->
-            val ax = ap.arPositionX
-            val ay = ap.arPositionY
-            val az = ap.arPositionZ
-            if (ax != null && ay != null && az != null) {
-                val dx = ax - camX
-                val dy = ay - camY
-                val dz = az - camZ
-                val dist = sqrt(dx * dx + dy * dy + dz * dz)
-                ap.copy(distanceToUserM = dist)
-            } else {
-                ap
+        val currentAPs = _accessPoints.value
+        if (currentAPs.isNotEmpty()) {
+            val updatedAPs = currentAPs.mapValues { (_, ap) ->
+                val ax = ap.arPositionX
+                val ay = ap.arPositionY
+                val az = ap.arPositionZ
+                if (ax != null && ay != null && az != null) {
+                    val dx = ax - camX
+                    val dy = ay - camY
+                    val dz = az - camZ
+                    val dist = sqrt(dx * dx + dy * dy + dz * dz)
+                    ap.copy(distanceToUserM = dist)
+                } else {
+                    ap
+                }
             }
+            _accessPoints.value = updatedAPs
         }
-        _accessPoints.value = updated
+
+        val currentHubs = _hubs.value
+        if (currentHubs.isNotEmpty()) {
+            val updatedHubs = currentHubs.mapValues { (_, hub) ->
+                val hx = hub.arPositionX
+                val hy = hub.arPositionY
+                val hz = hub.arPositionZ
+                if (hx != null && hy != null && hz != null) {
+                    val dx = hx - camX
+                    val dy = hy - camY
+                    val dz = hz - camZ
+                    val dist = sqrt(dx * dx + dy * dy + dz * dz)
+                    hub.copy(distanceToUserM = dist)
+                } else {
+                    hub
+                }
+            }
+            _hubs.value = updatedHubs
+        }
     }
 
     fun recalculateArCoordinates() {
-        // Called after AR calibration changes
-        val current = _accessPoints.value.toMutableMap()
-        for ((bssid, ap) in current) {
+        // Recalculate AP AR coordinates
+        val currentAPs = _accessPoints.value.toMutableMap()
+        for ((bssid, ap) in currentAPs) {
             val serverPos = ap.serverPosition
             if (serverPos != null) {
                 val (arX, arY, arZ) = transformer.serverToAr(serverPos)
-                current[bssid] = ap.copy(arPositionX = arX, arPositionY = arY, arPositionZ = arZ)
+                currentAPs[bssid] = ap.copy(arPositionX = arX, arPositionY = arY, arPositionZ = arZ)
             }
         }
-        _accessPoints.value = current
+        _accessPoints.value = currentAPs
+
+        // Recalculate Hub AR coordinates
+        val currentHubs = _hubs.value.toMutableMap()
+        for ((id, hub) in currentHubs) {
+            val serverPos = hub.serverPosition
+            if (serverPos != null && (serverPos.x != 0.0 || serverPos.y != 0.0 || serverPos.z != 0.0)) {
+                val (arX, arY, arZ) = transformer.serverToAr(serverPos)
+                currentHubs[id] = hub.copy(arPositionX = arX, arPositionY = arY, arPositionZ = arZ, isCalibrated = true)
+            }
+        }
+        _hubs.value = currentHubs
     }
 
     fun selectAP(bssid: String?) {

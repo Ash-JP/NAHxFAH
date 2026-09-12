@@ -115,6 +115,63 @@ data class APUpdateMessage(
     val ap: APUpdatePayload
 )
 
+@Serializable
+data class HubPayload(
+    @SerialName("hub_id") val hubId: String,
+    @SerialName("device_type") val deviceType: String = "laptop",
+    val platform: String = "windows",
+    val version: String = "1.0.0",
+    val status: String = "online",
+    @SerialName("coordinate_system") val coordinateSystem: String? = null,
+    val position: APPosition? = null,
+    @SerialName("observation_count") val observationCount: Long = 0,
+    @SerialName("last_seen") val lastSeen: String? = null
+)
+
+@Serializable
+data class HubsSnapshotMessage(
+    val type: String = "hubs_snapshot",
+    val hubs: List<HubPayload> = emptyList()
+)
+
+@Serializable
+data class HubUpdateMessage(
+    val type: String = "hub_update",
+    val hub: HubPayload
+)
+
+@Serializable
+data class UpdateHubPositionMessage(
+    val type: String = "update_hub_position",
+    @SerialName("hub_id") val hubId: String,
+    @SerialName("coordinate_system") val coordinateSystem: String = "local",
+    val x: Double,
+    val y: Double,
+    val z: Double
+)
+
+data class HubUIState(
+    val hubId: String,
+    val deviceType: String = "laptop",
+    val platform: String = "windows",
+    val version: String = "1.0.0",
+    val status: String = "online",
+    val serverPosition: APPosition? = null,
+    val arPositionX: Float? = null,
+    val arPositionY: Float? = null,
+    val arPositionZ: Float? = null,
+    val distanceToUserM: Float? = null,
+    val observationCount: Long = 0,
+    val isCalibrated: Boolean = false,
+    val isSelected: Boolean = false,
+    val lastSeen: String? = null,
+    val lastUpdatedMs: Long = System.currentTimeMillis()
+) {
+    val serverPositionX: Double get() = serverPosition?.x ?: 0.0
+    val serverPositionY: Double get() = serverPosition?.y ?: 0.0
+    val serverPositionZ: Double get() = serverPosition?.z ?: 0.0
+}
+
 // --- Enums & UI State ---
 
 enum class ConnectionStatus {

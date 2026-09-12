@@ -51,6 +51,9 @@ class ServerWebSocketManager(private val context: Context) {
     private val _apUpdates = MutableSharedFlow<APUpdatePayload>(replay = 50, extraBufferCapacity = 100)
     val apUpdates: SharedFlow<APUpdatePayload> = _apUpdates.asSharedFlow()
 
+    private val _hubsState = MutableStateFlow<Map<String, HubUIState>>(emptyMap())
+    val hubsState: StateFlow<Map<String, HubUIState>> = _hubsState.asStateFlow()
+
     private val _lastMessageTime = MutableStateFlow(0L)
     val lastMessageTime: StateFlow<Long> = _lastMessageTime.asStateFlow()
 
@@ -195,6 +198,48 @@ class ServerWebSocketManager(private val context: Context) {
                     val msg = json.decodeFromString<APUpdateMessage>(text)
                     scope.launch { _apUpdates.emit(msg.ap) }
                 }
+                "hubs_snapshot" -> {
+                    val snapshot = json.decodeFromString<HubsSnapshotMessage>(text)
+                    val map = snapshot.hubs.associate { hub ->
+                        hub.hubId to HubUIState(
+                            hubId = hub.hubId,
+                            deviceType = hub.deviceType,
+                            platform = hub.platform,
+                            version = hub.version,
+                            status = hub.status,
+                            serverPosition = hub.position,
+                            observationCount = hub.observationCount,
+                            isCalibrated = hub.position != null && (hub.position.x != 0.0 || hub.position.y != 0.0 || hub.position.z != 0.0),
+                            lastSeen = hub.lastSeen
+                        )
+                    }
+                    _hubsState.value = map
+                    Log.i(TAG, "Received hubs snapshot with ${map.size} venue hubs")
+                }
+                "hub_update" -> {
+                    val msg = json.decodeFromString<HubUpdateMessage>(text)
+                    val hub = msg.hub
+                    val current = _hubsState.value.toMutableMap()
+                    val existing = current[hub.hubId]
+                    current[hub.hubId] = HubUIState(
+                        hubId = hub.hubId,
+                        deviceType = if (hub.deviceType.isNotEmpty()) hub.deviceType else existing?.deviceType ?: "laptop",
+                        platform = if (hub.platform.isNotEmpty()) hub.platform else existing?.platform ?: "windows",
+                        version = if (hub.version.isNotEmpty()) hub.version else existing?.version ?: "1.0.0",
+                        status = if (hub.status.isNotEmpty()) hub.status else existing?.status ?: "online",
+                        serverPosition = hub.position ?: existing?.serverPosition,
+                        observationCount = if (hub.observationCount > 0) hub.observationCount else existing?.observationCount ?: 0L,
+                        isCalibrated = (hub.position != null && (hub.position.x != 0.0 || hub.position.y != 0.0 || hub.position.z != 0.0)) || existing?.isCalibrated == true,
+                        lastSeen = hub.lastSeen ?: existing?.lastSeen,
+                        arPositionX = existing?.arPositionX,
+                        arPositionY = existing?.arPositionY,
+                        arPositionZ = existing?.arPositionZ,
+                        distanceToUserM = existing?.distanceToUserM,
+                        isSelected = existing?.isSelected ?: false
+                    )
+                    _hubsState.value = current
+                    Log.i(TAG, "Venue hub updated: ${hub.hubId} (status: ${hub.status}, pos: ${hub.position})")
+                }
                 "mobile_registered" -> {
                     Log.i(TAG, "Mobile registered successfully on server!")
                 }
@@ -211,6 +256,35 @@ class ServerWebSocketManager(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing server message: ${e.message} in: $text")
         }
+    }
+
+    /**
+     * Calibrates / updates a hub's physical location in the venue.
+     */
+    fun sendUpdateHubPosition(hubId: String, x: Double, y: Double, z: Double, cs: String = "local") {
+        val msg = UpdateHubPositionMessage(
+            hubId = hubId,
+            coordinateSystem = cs,
+            x = x,
+            y = y,
+            z = z
+        )
+        val payload = json.encodeToString(msg)
+        if (_connectionState.value == ConnectionStatus.CONNECTED) {
+            webSocket?.send(payload)
+            Log.i(TAG, "Sent update_hub_position for $hubId: $payload")
+        }
+
+        // Optimistically update local state
+        val current = _hubsState.value.toMutableMap()
+        val existing = current[hubId]
+        current[hubId] = (existing ?: HubUIState(hubId = hubId)).copy(
+            serverPosition = APPosition(x, y, z),
+            isCalibrated = true,
+            status = "online",
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+        _hubsState.value = current
     }
 
     /**

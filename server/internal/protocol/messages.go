@@ -24,17 +24,21 @@ const (
 	MsgHeartbeat        MessageType = "heartbeat"
 
 	// Server → Hub
-	MsgHubRegistered MessageType = "hub_registered"
-	MsgHeartbeatAck  MessageType = "heartbeat_ack"
-	MsgError         MessageType = "error"
-	MsgAPUpdate      MessageType = "ap_update"
+	MsgHubRegistered     MessageType = "hub_registered"
+	MsgHeartbeatAck      MessageType = "heartbeat_ack"
+	MsgError             MessageType = "error"
+	MsgAPUpdate          MessageType = "ap_update"
+	MsgHubPositionUpdate MessageType = "hub_position_update"
 
 	// Mobile → Server
 	MsgMobileRegister         MessageType = "mobile_register"
 	MsgMobilePose             MessageType = "mobile_pose"
 	MsgMobileWiFiObservations MessageType = "mobile_wifi_observations"
+	MsgUpdateHubPosition      MessageType = "update_hub_position"
 
-	// Server → Dashboard
+	// Server → Mobile & Dashboard
+	MsgHubsSnapshot     MessageType = "hubs_snapshot"
+	MsgHubUpdate        MessageType = "hub_update"
 	MsgHubStatus        MessageType = "hub_status"
 	MsgObservationStats MessageType = "observation_stats"
 	MsgServerStatus     MessageType = "server_status"
@@ -214,6 +218,48 @@ type Quaternion struct {
 	QY float64 `json:"qy"`
 	QZ float64 `json:"qz"`
 	QW float64 `json:"qw"`
+}
+
+// HubPayload represents a hub's state and position sent to mobile clients.
+type HubPayload struct {
+	HubID            string      `json:"hub_id"`
+	DeviceType       string      `json:"device_type"`
+	Platform         string      `json:"platform"`
+	Version          string      `json:"version"`
+	Status           string      `json:"status"`
+	CoordinateSystem string      `json:"coordinate_system,omitempty"`
+	Position         *APPosition `json:"position,omitempty"`
+	ObservationCount int         `json:"observation_count"`
+	LastSeen         *time.Time  `json:"last_seen,omitempty"`
+}
+
+// HubsSnapshotMessage sends the current list of venue hubs to clients.
+type HubsSnapshotMessage struct {
+	Type MessageType  `json:"type"`
+	Hubs []HubPayload `json:"hubs"`
+}
+
+// HubUpdateMessage broadcasts a change in hub status or position.
+type HubUpdateMessage struct {
+	Type MessageType `json:"type"`
+	Hub  HubPayload  `json:"hub"`
+}
+
+// UpdateHubPositionMessage is sent by mobile AR clients to calibrate a hub.
+type UpdateHubPositionMessage struct {
+	Type             MessageType `json:"type"`
+	HubID            string      `json:"hub_id"`
+	CoordinateSystem string      `json:"coordinate_system"`
+	X                float64     `json:"x"`
+	Y                float64     `json:"y"`
+	Z                float64     `json:"z"`
+}
+
+// HubPositionUpdateMessage notifies a hub agent of its calibrated position.
+type HubPositionUpdateMessage struct {
+	Type     MessageType        `json:"type"`
+	HubID    string             `json:"hub_id"`
+	Position HubPositionPayload `json:"position"`
 }
 
 // ---------------------------------------------------------------------------

@@ -227,6 +227,22 @@ class HubWebSocketClient:
         elif msg_type == "ap_update":
             if self._on_ap_update:
                 self._on_ap_update(msg)
+        elif msg_type == "hub_position_update":
+            pos_data = msg.get("position", {})
+            if "x" in pos_data and "y" in pos_data and "z" in pos_data:
+                try:
+                    from config import save_config
+                    from models import HubPosition
+                    new_x = float(pos_data["x"])
+                    new_y = float(pos_data["y"])
+                    new_z = float(pos_data["z"])
+                    cs = pos_data.get("coordinate_system", "local")
+                    self._config.position = HubPosition(coordinate_system=cs, x=new_x, y=new_y, z=new_z)
+                    self._config.coordinate_system = cs
+                    save_config(self._config)
+                    logger.info("Hub position calibrated via AR: X=%.2f, Y=%.2f, Z=%.2f (%s)", new_x, new_y, new_z, cs)
+                except Exception as e:
+                    logger.error("Failed to apply hub position update: %s", e)
         elif msg_type == "error":
             logger.warning("Server error: %s — %s", msg.get("code"), msg.get("message"))
         else:

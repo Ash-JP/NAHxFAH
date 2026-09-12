@@ -213,12 +213,15 @@ fun MainARScreen(
     val connectionStatus by webSocketManager.connectionState.collectAsState()
     val accessPointsMap by markerManager.accessPoints.collectAsState()
     val selectedBssid by markerManager.selectedBssid.collectAsState()
+    val hubsMap by markerManager.hubs.collectAsState()
+    val selectedHubId by markerManager.selectedHubId.collectAsState()
     val calibrationState by calibrationManager.calibrationState.collectAsState()
     val localScans by wifiScanner.scanResults.collectAsState()
     val lastScanTime by wifiScanner.lastScanTimestamp.collectAsState()
 
     // Dialog sheets
     var showCalibrationDialog by remember { mutableStateOf(false) }
+    var showHubsSheet by remember { mutableStateOf(false) }
     var showAPListSheet by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showDebugOverlay by remember { mutableStateOf(false) }
@@ -251,10 +254,17 @@ fun MainARScreen(
     var lastDispatchZ by remember { mutableFloatStateOf(0f) }
     var lastDispatchTimeMs by remember { mutableLongStateOf(0L) }
 
-    // Auto-dispatch incoming server AP updates into ARMarkerManager
+    // Auto-dispatch incoming server AP and Hub updates into ARMarkerManager
     LaunchedEffect(Unit) {
-        webSocketManager.apUpdates.collectLatest { apUpdate ->
-            markerManager.onAPUpdateReceived(apUpdate)
+        launch {
+            webSocketManager.apUpdates.collectLatest { apUpdate ->
+                markerManager.onAPUpdateReceived(apUpdate)
+            }
+        }
+        launch {
+            webSocketManager.hubsState.collectLatest { hubs ->
+                markerManager.updateHubs(hubs)
+            }
         }
     }
 
@@ -387,9 +397,15 @@ fun MainARScreen(
             .take(12)
         val selectedAP = accessPointsMap[selectedBssid]
 
+        val calibratedHubs = hubsMap.values
+            .filter { it.isCalibrated && it.arPositionX != null && it.arPositionY != null && it.arPositionZ != null }
+        val selectedHub = hubsMap[selectedHubId]
+
         // Place real 3D glowing spheres in the ARCore camera feed
-        LaunchedEffect(activeAPs) {
+        LaunchedEffect(activeAPs, calibratedHubs) {
             childNodes.clear()
+
+            // 1. Localized Access Points (cyan/amber/red based on confidence)
             for (ap in activeAPs) {
                 val arX = ap.arPositionX ?: continue
                 val arY = ap.arPositionY ?: continue
@@ -409,8 +425,25 @@ fun MainARScreen(
                 sphere.position = Position(arX, arY, arZ)
                 childNodes.add(sphere)
             }
+
+            // 2. Calibrated Venue Hubs (purple/violet beacons)
+            for (hub in calibratedHubs) {
+                val arX = hub.arPositionX ?: continue
+                val arY = hub.arPositionY ?: continue
+                val arZ = hub.arPositionZ ?: continue
+
+                val mat = materialLoader.createColorInstance(Color(0xFFBB86FC).toArgb())
+                val sphere = SphereNode(
+                    engine = engine,
+                    radius = 0.20f,
+                    materialInstance = mat
+                )
+                sphere.position = Position(arX, arY, arZ)
+                childNodes.add(sphere)
+            }
         }
 
+        // 2D overlays for Access Points
         for (ap in activeAPs) {
             val arX = ap.arPositionX ?: continue
             val arY = ap.arPositionY ?: continue
@@ -427,18 +460,47 @@ fun MainARScreen(
             )
 
             if (screenPoint.isVisibleInFov) {
-                // Render on-screen AR Marker + Predicted Location Area
                 APLocationMarkerOverlay(
                     screenPoint = screenPoint,
                     ap = ap,
                     onSelect = { markerManager.selectAP(ap.bssid) }
                 )
             } else if (ap.bssid == selectedBssid) {
-                // Off-screen Directional Indicator Arrow for selected AP
                 OffScreenDirectionIndicator(
                     screenPoint = screenPoint,
                     ap = ap,
                     onClick = { /* selected */ }
+                )
+            }
+        }
+
+        // 2D overlays for Venue Hubs
+        for (hub in calibratedHubs) {
+            val arX = hub.arPositionX ?: continue
+            val arY = hub.arPositionY ?: continue
+            val arZ = hub.arPositionZ ?: continue
+
+            val screenPoint = markerManager.projectToScreen(
+                posX = arX,
+                posY = arY,
+                posZ = arZ,
+                viewMatrix = viewMatrix,
+                projMatrix = projMatrix,
+                screenWidth = screenWidthPx,
+                screenHeight = screenHeightPx
+            )
+
+            if (screenPoint.isVisibleInFov) {
+                HubLocationMarkerOverlay(
+                    screenPoint = screenPoint,
+                    hub = hub,
+                    onSelect = { markerManager.selectHub(hub.hubId) }
+                )
+            } else if (hub.hubId == selectedHubId) {
+                HubOffScreenDirectionIndicator(
+                    screenPoint = screenPoint,
+                    hub = hub,
+                    onClick = { markerManager.selectHub(null) }
                 )
             }
         }
@@ -449,9 +511,12 @@ fun MainARScreen(
             lastScanTimeMs = lastScanTime,
             apCount = accessPointsMap.size,
             localizedCount = activeAPs.size,
+            hubsCount = hubsMap.size,
+            uncalibratedHubsCount = hubsMap.values.count { !it.isCalibrated },
             isCalibrated = calibrationState.isCalibrated,
             onOpenSettings = { showSettingsDialog = true },
             onOpenCalibration = { showCalibrationDialog = true },
+            onOpenHubs = { showHubsSheet = true },
             onOpenAPList = { showAPListSheet = true },
             onToggleDebug = { showDebugOverlay = !showDebugOverlay }
         )
@@ -561,6 +626,25 @@ fun MainARScreen(
                     showCalibrationDialog = false
                 },
                 onDismiss = { showCalibrationDialog = false }
+            )
+        }
+
+        if (showHubsSheet) {
+            VenueHubsBottomSheet(
+                hubs = hubsMap.values.toList(),
+                cameraX = cameraPoseX,
+                cameraY = cameraPoseY,
+                cameraZ = cameraPoseZ,
+                transformer = transformer,
+                onAnchorHub = { hubId, sX, sY, sZ ->
+                    webSocketManager.sendUpdateHubPosition(hubId, sX, sY, sZ)
+                    markerManager.recalculateArCoordinates()
+                },
+                onSelectHub = { hubId ->
+                    markerManager.selectHub(hubId)
+                    showHubsSheet = false
+                },
+                onDismiss = { showHubsSheet = false }
             )
         }
 
@@ -758,9 +842,12 @@ fun TopStatusBar(
     lastScanTimeMs: Long,
     apCount: Int,
     localizedCount: Int,
+    hubsCount: Int,
+    uncalibratedHubsCount: Int,
     isCalibrated: Boolean,
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
+    onOpenHubs: () -> Unit,
     onOpenAPList: () -> Unit,
     onToggleDebug: () -> Unit
 ) {
@@ -803,15 +890,26 @@ fun TopStatusBar(
                 )
             }
 
-            // AP Counts & Scan Age
+            // AP Counts & Hubs Count
             Text(
-                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount (${scanAgeSec}s)" else "No Wi-Fi scan",
+                text = if (scanAgeSec >= 0) "APs: $localizedCount/$apCount | Hubs: $hubsCount (${scanAgeSec}s)" else "Hubs: $hubsCount",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.LightGray
             )
 
             // Buttons
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenHubs, modifier = Modifier.size(32.dp)) {
+                    BadgedBox(badge = {
+                        if (uncalibratedHubsCount > 0) {
+                            Badge(containerColor = Color(0xFFFF9800)) {
+                                Text("$uncalibratedHubsCount", color = Color.White, fontSize = 9.sp)
+                            }
+                        }
+                    }) {
+                        Text(text = "💻", fontSize = 18.sp)
+                    }
+                }
                 IconButton(onClick = onOpenCalibration, modifier = Modifier.size(32.dp)) {
                     Text(text = "🧭", fontSize = 18.sp)
                 }
@@ -1264,6 +1362,329 @@ fun APListBottomSheet(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================
+// Hub Location Marker & AR Billboard
+// ==========================================
+
+@Composable
+fun HubLocationMarkerOverlay(
+    screenPoint: ScreenPoint,
+    hub: HubUIState,
+    onSelect: () -> Unit
+) {
+    val density = LocalDensity.current
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset((screenPoint.screenX).roundToInt(), (screenPoint.screenY).roundToInt()) }
+    ) {
+        // --- Center Hub Pin Point (Purple glowing beacon) ---
+        Box(
+            modifier = Modifier
+                .size(16.dp)
+                .offset((-8).dp, (-8).dp)
+                .background(Color.White, CircleShape)
+                .border(3.dp, if (hub.isSelected) Color.Yellow else Color(0xFF9C27B0), CircleShape)
+        )
+
+        // --- Floating Billboard HUD Card ---
+        Card(
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (hub.isSelected) Color(0xDD3A1C5A) else Color(0xDD1E1035)
+            ),
+            border = if (hub.isSelected) borderCardStroke(Color.Yellow) else borderCardStroke(Color(0x999C27B0)),
+            modifier = Modifier
+                .offset(x = (-80).dp, y = (-110).dp)
+                .width(170.dp)
+                .clickable { onSelect() }
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                // Hub Name / ID
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "💻",
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = hub.hubId,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Distance
+                Text(
+                    text = hub.distanceToUserM?.let { "%.1fm away".format(it) } ?: "Anchored",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFCE93D8)
+                )
+
+                // Status & Observation Count
+                Text(
+                    text = if (hub.isCalibrated) "Calibrated • %d obs".format(hub.observationCount) else "Uncalibrated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (hub.isCalibrated) Color(0xFF81C784) else Color(0xFFFFB74D)
+                )
+            }
+        }
+    }
+}
+
+// ==========================================
+// Hub Off-Screen Directional Indicator
+// ==========================================
+
+@Composable
+fun HubOffScreenDirectionIndicator(
+    screenPoint: ScreenPoint,
+    hub: HubUIState,
+    onClick: () -> Unit
+) {
+    val x = screenPoint.screenX
+    val y = screenPoint.screenY
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset((x - 45).roundToInt(), (y - 25).roundToInt()) }
+            .background(Color(0xDD9C27B0), RoundedCornerShape(16.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "➤",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier.rotate(screenPoint.edgeAngleDegrees)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "${hub.hubId} (${hub.distanceToUserM?.let { "%.1fm".format(it) } ?: "..."})",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+    }
+}
+
+// ==========================================
+// Venue Hubs Sheet (Auto-Discovery & 1-Tap Anchor)
+// ==========================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VenueHubsBottomSheet(
+    hubs: List<HubUIState>,
+    cameraX: Float,
+    cameraY: Float,
+    cameraZ: Float,
+    transformer: CoordinateTransformer,
+    onAnchorHub: (hubId: String, sX: Double, sY: Double, sZ: Double) -> Unit,
+    onSelectHub: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Venue Wi-Fi Hubs (${hubs.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "${hubs.count { it.isCalibrated }}/${hubs.size} Calibrated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (hubs.all { it.isCalibrated } && hubs.isNotEmpty()) Color(0xFF388E3C) else Color(0xFFF57C00),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = "Automatic hub discovery enabled. Walk over to any laptop running a hub agent and tap 'Anchor Here' to lock its exact physical 3D location.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (hubs.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "💻", fontSize = 36.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No active hubs detected",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Start python main.py on your venue laptops. They will appear here automatically via WebSocket.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxHeight(0.6f)) {
+                    items(hubs) { hub ->
+                        HubItemCard(
+                            hub = hub,
+                            onAnchorHere = {
+                                val sPose = transformer.arToServer(cameraX, cameraY, cameraZ)
+                                onAnchorHub(hub.hubId, sPose.x, sPose.y, sPose.z)
+                            },
+                            onSelect = { onSelectHub(hub.hubId) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HubItemCard(
+    hub: HubUIState,
+    onAnchorHere: () -> Unit,
+    onSelect: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (hub.isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "💻", fontSize = 18.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = hub.hubId,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${hub.platform.ifEmpty { "Venue Laptop" }} • ${hub.observationCount} scans received",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    color = if (hub.isCalibrated) Color(0x334CAF50) else Color(0x33FF9800),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = if (hub.isCalibrated) "Calibrated" else "Needs Calibration",
+                        color = if (hub.isCalibrated) Color(0xFF2E7D32) else Color(0xFFE65100),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (hub.isCalibrated) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Pos: (%.1f, %.1f, %.1f) m".format(hub.serverPositionX, hub.serverPositionY, hub.serverPositionZ),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (hub.distanceToUserM != null) {
+                        Text(
+                            text = "~%.1f m away".format(hub.distanceToUserM),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF7C4DFF)
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = "Default / unverified location. Bring phone near laptop to anchor accurately.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE65100)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (hub.isCalibrated) {
+                    OutlinedButton(
+                        onClick = onSelect,
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Highlight in AR")
+                    }
+                    Button(
+                        onClick = onAnchorHere,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("Re-Anchor Here")
+                    }
+                } else {
+                    Button(
+                        onClick = onAnchorHere,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("📍 Anchor Here (Phone Position)")
                     }
                 }
             }
