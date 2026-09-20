@@ -6,7 +6,7 @@
 
 
 ## Basic Details
-### Team Name: [Name]
+### Team Name: NAHxFAH
 
 
 ### Team Members
@@ -17,24 +17,23 @@
 WIFI HUNTER AR is a distributed indoor spatial intelligence and Augmented Reality platform that turns ordinary venue laptops into a synchronized radar network. It passively captures 2.4 GHz and 5 GHz radio frequencies, computes 3D log-distance trilateration in real-time via a Go backend, and renders live holographic Wi-Fi access points floating in physical space on an Android ARCore app.
 
 ### The Problem (that doesn't exist)
-Have you ever stared blankly at your smartphone's Wi-Fi signal dropping to one bar while sitting in a room, desperately wishing you possessed superhuman laser-vision to literally see the invisible electromagnetic radio waves bouncing off the walls and hunt down the exact physical location of the rogue router like a cybernetic Ghostbuster?
+Have you ever stared blankly at your smartphone's Wi-Fi list while sitting in a room, desperately wishing you possessed superhuman laser-vision to literally see the invisible electromagnetic radio waves bouncing off the walls and hunt down the exact physical location of the hotspot/router like a cybernetic Ghostbuster?
 
 ### The Solution (that nobody asked for)
-WIFI HUNTER AR solves this non-existent crisis by deploying laptops into the four corners of your room to form a high-precision RF sonar grid. The laptops continuously scan BSSIDs and RSSI signals via native Windows WLAN APIs, stream them to a high-concurrency Go server that computes 3D spatial trilateration, and project floating Augmented Reality holograms directly onto your Android phone's camera feed so you can literally walk up to the invisible Wi-Fi signal and look it in the eye!
+WIFI HUNTER AR solves this non-existent crisis by deploying laptops to act as hubs multiple corners of your room to form a high-precision RF sonar grid with local grid system as GPS are useless indoors. The laptops continuously scan BSSIDs and RSSI signals via native Windows WLAN APIs, stream them to a high-concurrency Go server that computes 3D spatial trilateration, and project floating Augmented Reality holograms directly onto your Android phone's camera feed so you can literally walk up to the invisible Wi-Fi signal and look it in the eye!
 
 ## Technical Details
 ### Technologies/Components Used
 For Software:
-- Languages: Go (1.24), Kotlin (1.9+), Python (3.11+), SQL
+- Languages: Go (1.24), Kotlin (1.9+), Python (3.11+), PostgreSQL
 - Frameworks: Android Jetpack Compose, Google ARCore, Sceneview (Google Filament 3D Engine), Gorilla WebSocket, Chi Router
 - Libraries: Windows Native Wifi API (WlanAPI via ctypes), pgx/v5 (PostgreSQL Driver), kotlinx.coroutines, kotlinx.serialization
 - Tools: Docker & Docker Compose, Android Studio, Gradle, PostgreSQL 16, Git
 
 For Hardware:
-- 4x Windows Laptops / Mini-PCs (acting as stationary corner venue scanning radar hubs)
+- 4+ Windows Laptops (acting as stationary corner venue scanning radar hubs)
 - 1x Android Smartphone running Android 10+ with Google Play Services for AR (ARCore) support
-- Dual-band 802.11ac/ax Wi-Fi adapters for multi-frequency (2.4 GHz & 5 GHz) RSSI capture
-- Local Wi-Fi Router / Access Points to detect and localize
+- Local Wi-Fi Router / Hotspot from mobile phones
 
 ### Implementation
 For Software:
@@ -118,11 +117,11 @@ For Hardware:
 [Add any extra demo materials/links]
 
 ## Team Contributions
-- Sreedev S S: Go backend architecture, 3D grid localization engine, WebSocket hub manager, and Android ARCore mobile client
-- Aashray J Pramod: Windows WLAN native hub agent, signal processing (EMA/MAD), telemetry web dashboard, and venue multi-hub calibration testing
+- Sreedev S S: Go backend architecture, 3D grid localization engine, WebSocket hub manager, and venue multi-hub calibration testing
+- Aashray J Pramod: Windows WLAN native hub agent, signal processing (EMA/MAD), telemetry web dashboard, and Android ARCore mobile client
 
 ---
-Made with ❤️ at TinkerHub Useless Projects 
+Made with ❤️ at TinkerHub Useless Projects @CEAL
 
 ![Static Badge](https://img.shields.io/badge/TinkerHub-24?color=%23000000&link=https%3A%2F%2Fwww.tinkerhub.org%2F)
 ![Static Badge](https://img.shields.io/badge/UselessProjects--26-26?link=https%3A%2F%2Ftinkerhub.org%2Fevents%2F1M8ORET9A1%2Fuseless-projects-3.0)
